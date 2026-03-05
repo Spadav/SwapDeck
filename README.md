@@ -58,6 +58,29 @@ Edit this file directly, or use the **Settings** page in the UI after starting t
 
 ### 3. Run
 
+#### Option A: Backend only (recommended for normal use)
+
+Build frontend once:
+
+```bash
+cd frontend
+npm install
+npm run build
+```
+
+Start backend:
+
+```bash
+cd ../backend
+python main.py
+```
+
+Open:
+
+- `http://127.0.0.1:8091`
+
+#### Option B: Dev mode (hot reload, two terminals)
+
 ```bash
 # Terminal 1 — backend
 cd backend

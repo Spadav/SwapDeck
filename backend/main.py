@@ -32,6 +32,8 @@ import requests
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, HttpUrl
 import uvicorn
 
@@ -40,6 +42,7 @@ LLAMA_SWAP_PROCESS_FILE = "/tmp/llama_swap.pid"
 LLAMA_SWAP_LOG_FILE = "/tmp/llama_swap.log"
 
 SETTINGS_FILE = Path(__file__).parent / "settings.json"
+FRONTEND_DIST_DIR = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 
 DEFAULT_SETTINGS = {
     "gguf_directory": "~/models",
@@ -84,6 +87,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Serve built frontend files when available (single-process runtime mode).
+if (FRONTEND_DIST_DIR / "assets").exists():
+    app.mount("/assets", StaticFiles(directory=FRONTEND_DIST_DIR / "assets"), name="assets")
 
 
 @dataclass
@@ -656,6 +663,37 @@ def api_save_settings(new_settings: Dict[str, Any]):
 def health_check():
     """Health check endpoint"""
     return {"status": "ok", "timestamp": datetime.now().isoformat()}
+
+
+@app.get("/", include_in_schema=False)
+def serve_frontend_index():
+    """Serve the built frontend index if present."""
+    index_file = FRONTEND_DIST_DIR / "index.html"
+    if index_file.exists():
+        return FileResponse(index_file)
+    raise HTTPException(
+        status_code=404,
+        detail="Frontend build not found. Run `cd frontend && npm run build`."
+    )
+
+
+@app.get("/{full_path:path}", include_in_schema=False)
+def serve_frontend_spa(full_path: str):
+    """SPA fallback for client-side routes when serving built frontend."""
+    if full_path.startswith(("api/", "ws/", "health")):
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    candidate = FRONTEND_DIST_DIR / full_path
+    if candidate.exists() and candidate.is_file():
+        return FileResponse(candidate)
+
+    index_file = FRONTEND_DIST_DIR / "index.html"
+    if index_file.exists():
+        return FileResponse(index_file)
+    raise HTTPException(
+        status_code=404,
+        detail="Frontend build not found. Run `cd frontend && npm run build`."
+    )
 
 
 if __name__ == "__main__":
