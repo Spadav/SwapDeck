@@ -1,0 +1,7 @@
+{
+  "gguf_directory": "~/models",
+  "llama_swap_dir": "~/llama-swap",
+  "llama_swap_config": "~/llama-swap/config.yaml",
+  "llama_swap_port": 8090,
+  "backend_port": 8091
+}
