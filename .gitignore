@@ -12,6 +12,8 @@ backend/settings.json
 .env
 *.log
 *.pid
+scripts/
+assets/
 
 # OS/editor
 .DS_Store

@@ -8,6 +8,7 @@ import sys
 import re
 import json
 import glob
+import shlex
 import shutil
 import subprocess
 import logging
@@ -51,6 +52,31 @@ DEFAULT_SETTINGS = {
     "llama_swap_port": 8090,
     "backend_port": 8091,
 }
+
+
+def get_llama_swap_executable() -> str:
+    """Resolve llama-swap to an executable path that also works from GUI-launched shells."""
+    configured = os.environ.get("LLAMA_SWAP_BIN")
+    candidates = [
+        configured,
+        shutil.which("llama-swap"),
+        os.path.expanduser("~/.local/bin/llama-swap"),
+        "/home/linuxbrew/.linuxbrew/bin/llama-swap",
+        "/usr/local/bin/llama-swap",
+        "/usr/bin/llama-swap",
+    ]
+
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+
+    raise HTTPException(
+        status_code=500,
+        detail=(
+            "Failed to find llama-swap executable. Set LLAMA_SWAP_BIN or install "
+            "llama-swap somewhere in PATH."
+        ),
+    )
 
 
 def load_settings() -> Dict[str, Any]:
@@ -157,7 +183,8 @@ def is_llama_swap_running() -> bool:
 def get_llama_swap_pid() -> Optional[int]:
     """Get the PID of the running llama-swap process"""
     try:
-        result = run_command(["pgrep", "-x", "llama-swap"])
+        llama_swap_bin = get_llama_swap_executable()
+        result = run_command(["pgrep", "-f", llama_swap_bin])
         if result.returncode == 0:
             pid = int(result.stdout.strip().split()[0])
             logger.info(f"Found llama-swap PID: {pid}")
@@ -177,10 +204,12 @@ def start_llama_swap() -> Dict[str, Any]:
         swap_dir = os.path.expanduser(settings["llama_swap_dir"])
         swap_config = os.path.expanduser(settings["llama_swap_config"])
         swap_port = settings["llama_swap_port"]
+        llama_swap_bin = get_llama_swap_executable()
         # Mirror llama-swap output to a log file so the Status page can show it.
         cmd = (
             f"cd {swap_dir} && "
-            f"llama-swap --config {swap_config} --listen 0.0.0.0:{swap_port} 2>&1 | tee -a {LLAMA_SWAP_LOG_FILE}; "
+            f"{shlex.quote(llama_swap_bin)} --config {shlex.quote(swap_config)} "
+            f"--listen 0.0.0.0:{swap_port} 2>&1 | tee -a {shlex.quote(LLAMA_SWAP_LOG_FILE)}; "
             "exec bash"
         )
         env = os.environ.copy()
@@ -199,21 +228,22 @@ def start_llama_swap() -> Dict[str, Any]:
 def stop_llama_swap() -> Dict[str, Any]:
     """Stop llama-swap and all child processes (including llama-server) and close terminal"""
     try:
+        llama_swap_bin = get_llama_swap_executable()
         # Kill llama-server first, then llama-swap
-        for pattern in ["llama-server", "llama-swap"]:
+        for pattern in ["llama-server", llama_swap_bin]:
             subprocess.run(["pkill", "-f", pattern], capture_output=True)
 
         import time
         time.sleep(1)
 
         # Force kill any survivors
-        for pattern in ["llama-server", "llama-swap"]:
+        for pattern in ["llama-server", llama_swap_bin]:
             subprocess.run(["pkill", "-9", "-f", pattern], capture_output=True)
 
         # Close the terminal window by killing the bash shell that has our command
         swap_dir = os.path.expanduser(settings["llama_swap_dir"])
         subprocess.run(
-            ["pkill", "-f", f"cd {swap_dir} && llama-swap"],
+            ["pkill", "-f", f"cd {swap_dir} && {llama_swap_bin}"],
             capture_output=True
         )
 
