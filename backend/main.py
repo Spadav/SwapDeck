@@ -44,6 +44,12 @@ LLAMA_SWAP_LOG_FILE = "/tmp/llama_swap.log"
 
 SETTINGS_FILE = Path(__file__).parent / "settings.json"
 FRONTEND_DIST_DIR = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+CONFIG_EXAMPLE_FILE = Path(__file__).resolve().parent.parent / "config.example.yaml"
+NO_CACHE_HEADERS = {
+    "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+    "Pragma": "no-cache",
+    "Expires": "0",
+}
 
 DEFAULT_SETTINGS = {
     "gguf_directory": "~/models",
@@ -399,7 +405,7 @@ def get_config() -> Dict[str, Any]:
     
     try:
         with open(config_file, "r") as f:
-            config = yaml.safe_load(f)
+            config = yaml.safe_load(f) or {}
         logger.info(f"Config loaded successfully: {list(config.keys())}")
         return config
     except Exception as e:
@@ -412,9 +418,56 @@ def save_config(config: Dict[str, Any]) -> Dict[str, Any]:
     config_file = Path(os.path.expanduser(settings["llama_swap_config"]))
     
     with open(config_file, "w") as f:
-        yaml.dump(config, f, default_flow_style=False)
+        yaml.dump(config, f, default_flow_style=False, sort_keys=False)
     
     return {"saved": True}
+
+
+def get_config_raw() -> str:
+    """Get raw llama-swap configuration text."""
+    config_file = Path(os.path.expanduser(settings["llama_swap_config"]))
+
+    if not config_file.exists():
+        raise HTTPException(status_code=404, detail=f"Config file not found: {config_file}")
+
+    try:
+        return config_file.read_text()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error loading raw config: {str(e)}")
+
+
+def save_config_raw(content: str) -> Dict[str, Any]:
+    """Validate and save raw llama-swap configuration text."""
+    config_file = Path(os.path.expanduser(settings["llama_swap_config"]))
+
+    try:
+        parsed = yaml.safe_load(content) if content.strip() else {}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid YAML: {str(e)}")
+
+    if parsed is None:
+        parsed = {}
+
+    if not isinstance(parsed, dict):
+        raise HTTPException(status_code=400, detail="Config root must be a YAML mapping/object")
+
+    try:
+        config_file.write_text(content if content.endswith("\n") else f"{content}\n")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error saving raw config: {str(e)}")
+
+    return {"saved": True}
+
+
+def get_config_guide() -> str:
+    """Get the bundled llama-swap config example used as a guide."""
+    if not CONFIG_EXAMPLE_FILE.exists():
+        raise HTTPException(status_code=404, detail="Config guide file not found")
+
+    try:
+        return CONFIG_EXAMPLE_FILE.read_text()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error loading config guide: {str(e)}")
 
 
 def rename_model(old_name: str, new_name: str) -> Dict[str, Any]:
@@ -440,6 +493,10 @@ class DownloadRequest(BaseModel):
 class TestPrompt(BaseModel):
     prompt: str
     model: str = ""
+
+
+class RawConfigRequest(BaseModel):
+    content: str
 
 
 @app.get("/api/models")
@@ -487,6 +544,24 @@ def api_get_config():
 def api_save_config(config: Dict[str, Any]):
     """Save llama-swap configuration"""
     return save_config(config)
+
+
+@app.get("/api/config/raw")
+def api_get_config_raw():
+    """Get raw llama-swap configuration text."""
+    return {"content": get_config_raw()}
+
+
+@app.put("/api/config/raw")
+def api_save_config_raw(payload: RawConfigRequest):
+    """Save raw llama-swap configuration text."""
+    return save_config_raw(payload.content)
+
+
+@app.get("/api/config/guide")
+def api_get_config_guide():
+    """Get the bundled llama-swap config example as a guide."""
+    return {"content": get_config_guide()}
 
 
 @app.get("/api/status")
@@ -700,7 +775,7 @@ def serve_frontend_index():
     """Serve the built frontend index if present."""
     index_file = FRONTEND_DIST_DIR / "index.html"
     if index_file.exists():
-        return FileResponse(index_file)
+        return FileResponse(index_file, headers=NO_CACHE_HEADERS)
     raise HTTPException(
         status_code=404,
         detail="Frontend build not found. Run `cd frontend && npm run build`."
@@ -719,7 +794,7 @@ def serve_frontend_spa(full_path: str):
 
     index_file = FRONTEND_DIST_DIR / "index.html"
     if index_file.exists():
-        return FileResponse(index_file)
+        return FileResponse(index_file, headers=NO_CACHE_HEADERS)
     raise HTTPException(
         status_code=404,
         detail="Frontend build not found. Run `cd frontend && npm run build`."

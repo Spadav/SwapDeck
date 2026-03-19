@@ -9,6 +9,7 @@ frontend/dist/
 
 # Runtime/local config
 backend/settings.json
+config.example.yaml
 .env
 *.log
 *.pid
