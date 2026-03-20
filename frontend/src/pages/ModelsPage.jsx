@@ -27,6 +27,8 @@ function ModelsPage() {
   const [downloadFilename, setDownloadFilename] = useState('')
   const [downloading, setDownloading] = useState(false)
   const [progress, setProgress] = useState(0)
+  const [configMessage, setConfigMessage] = useState(null)
+  const [configuringModel, setConfiguringModel] = useState('')
 
   const handleDelete = async (filename) => {
     if (!confirm(`Delete ${filename}?`)) return
@@ -85,6 +87,31 @@ function ModelsPage() {
 
   const handleDownload = async () => {
     await startDownload(downloadUrl, downloadFilename)
+  }
+
+  const handleAddToConfig = async (filename) => {
+    try {
+      setConfiguringModel(filename)
+      setConfigMessage(null)
+      const response = await fetch('/api/config/add-model', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename })
+      })
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok) throw new Error(data.detail || 'Failed to add model to config')
+      setConfigMessage({
+        type: 'success',
+        text: `Added ${data.model_id} to config`
+      })
+    } catch (error) {
+      setConfigMessage({
+        type: 'error',
+        text: error.message || 'Failed to add model to config'
+      })
+    } finally {
+      setConfiguringModel('')
+    }
   }
 
   const fetchRepoFiles = async () => {
@@ -231,10 +258,20 @@ function ModelsPage() {
           <p style={{ color: 'var(--text-muted)' }}>No models installed</p>
         ) : (
           <div className="space-y-2">
+            {configMessage && (
+              <div
+                className={`px-3 py-2 rounded-lg text-sm border ${
+                  configMessage.type === 'success' ? 'text-green-700' : 'text-red-700'
+                }`}
+                style={{ borderColor: 'var(--line-soft)', background: 'rgba(148, 163, 184, 0.08)' }}
+              >
+                {configMessage.text}
+              </div>
+            )}
             {models.map((model) => (
               <div
                 key={model.filename}
-                className="flex items-center justify-between p-3 rounded-lg border"
+                className="flex items-center justify-between gap-3 p-3 rounded-lg border"
                 style={{ borderColor: 'var(--line-soft)', background: 'rgba(148, 163, 184, 0.08)' }}
               >
                 <div>
@@ -243,12 +280,21 @@ function ModelsPage() {
                     {model.size_gb} GiB • {formatDate(model.modified)}
                   </p>
                 </div>
-                <button
-                  onClick={() => handleDelete(model.filename)}
-                  className="btn btn-danger text-sm"
-                >
-                  Delete
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => handleAddToConfig(model.filename)}
+                    disabled={configuringModel === model.filename}
+                    className="btn btn-secondary text-sm"
+                  >
+                    {configuringModel === model.filename ? 'Adding...' : 'Add to Config'}
+                  </button>
+                  <button
+                    onClick={() => handleDelete(model.filename)}
+                    className="btn btn-danger text-sm"
+                  >
+                    Delete
+                  </button>
+                </div>
               </div>
             ))}
           </div>

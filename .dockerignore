@@ -1,0 +1,14 @@
+.git
+.gitignore
+backend/venv
+backend/__pycache__
+backend/*.pyc
+backend/settings.json
+frontend/node_modules
+frontend/dist
+models
+config
+assets
+scripts
+*.log
+*.pid

@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react'
 
 function SettingsPage() {
   const [settings, setSettings] = useState(null)
+  const [meta, setMeta] = useState(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState(null)
@@ -15,6 +16,8 @@ function SettingsPage() {
       const response = await fetch('/api/settings')
       if (!response.ok) throw new Error('API error')
       const data = await response.json()
+      setMeta(data._meta || null)
+      delete data._meta
       setSettings(data)
     } catch (error) {
       setSettings(null)
@@ -24,6 +27,10 @@ function SettingsPage() {
   }
 
   const handleSave = async () => {
+    if (meta?.managed_runtime) {
+      setMessage({ type: 'error', text: 'Docker mode uses container environment values for runtime paths and ports.' })
+      return
+    }
     try {
       setSaving(true)
       setMessage(null)
@@ -34,6 +41,8 @@ function SettingsPage() {
       })
       if (!response.ok) throw new Error('Save failed')
       const data = await response.json()
+      setMeta(data._meta || null)
+      delete data._meta
       setSettings(data)
       setMessage({ type: 'success', text: 'Settings saved' })
     } catch (error) {
@@ -64,10 +73,20 @@ function SettingsPage() {
     <div className="p-6">
       <div className="flex items-center justify-between mb-6">
         <h2 className="text-2xl font-semibold tracking-tight">Settings</h2>
-        <button onClick={handleSave} disabled={saving} className="btn btn-primary">
+        <button onClick={handleSave} disabled={saving || meta?.managed_runtime} className="btn btn-primary">
           {saving ? 'Saving...' : 'Save Settings'}
         </button>
       </div>
+
+      {meta?.managed_runtime && (
+        <div className="card mb-6">
+          <h3 className="text-lg font-semibold mb-2">Docker Mode</h3>
+          <p className="text-sm" style={{ color: 'var(--text-muted)' }}>
+            Runtime paths and ports come from Docker Compose and container environment values in this mode.
+            Edit the repo config and compose files instead of changing these fields here.
+          </p>
+        </div>
+      )}
 
       {message && (
         <div className={`mb-4 px-4 py-2 rounded-lg text-sm border ${
@@ -87,6 +106,7 @@ function SettingsPage() {
                 value={settings[key] ?? ''}
                 onChange={(e) => handleChange(key, type === 'number' ? parseInt(e.target.value) || 0 : e.target.value)}
                 className={inputClass}
+                disabled={meta?.managed_runtime}
               />
               <p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>{description}</p>
             </div>

@@ -8,14 +8,13 @@ import sys
 import re
 import json
 import glob
-import shlex
 import shutil
 import subprocess
 import logging
 from pathlib import Path
 from typing import Optional, Dict, List, Any
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import quote
 
 logging.basicConfig(
@@ -44,20 +43,63 @@ LLAMA_SWAP_LOG_FILE = "/tmp/llama_swap.log"
 
 SETTINGS_FILE = Path(__file__).parent / "settings.json"
 FRONTEND_DIST_DIR = Path(__file__).resolve().parent.parent / "frontend" / "dist"
-CONFIG_EXAMPLE_FILE = Path(__file__).resolve().parent.parent / "config.example.yaml"
+CONFIG_EXAMPLE_FILE = Path(__file__).resolve().parent.parent / "config" / "config.example.yaml"
 NO_CACHE_HEADERS = {
     "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
     "Pragma": "no-cache",
     "Expires": "0",
 }
+IS_DOCKER = os.environ.get("SWAPDECK_DOCKER") == "1"
+FALLBACK_CONFIG_GUIDE = """SwapDeck Config Guide
 
-DEFAULT_SETTINGS = {
+Core fields:
+- models: dictionary of model definitions
+- healthCheck.model: model used for readiness checks
+- globalTTL: default unload timer in seconds
+- startPort: starting value for ${PORT} macro expansion
+
+Per-model essentials:
+- cmd: command used to start the model server
+- proxy: upstream URL llama-swap forwards to
+- name: display name
+- aliases: extra model IDs using the same definition
+- checkEndpoint: health endpoint checked before serving traffic
+- filters.stripParams: request fields removed before forwarding
+- filters.setParams: request fields enforced server-side
+
+Advanced sections:
+- macros: reusable substitutions
+- groups: model loading/swap behavior
+- hooks: startup actions like preload
+- peers: remote providers or other llama-swap instances
+- apiKeys: optional auth requirement for requests
+"""
+
+LOCAL_DEFAULT_SETTINGS = {
     "gguf_directory": "~/models",
     "llama_swap_dir": "~/llama-swap",
     "llama_swap_config": "~/llama-swap/config.yaml",
     "llama_swap_port": 8090,
     "backend_port": 8091,
 }
+
+DOCKER_DEFAULT_SETTINGS = {
+    "gguf_directory": "/models",
+    "llama_swap_dir": "/runtime",
+    "llama_swap_config": "/config/config.yaml",
+    "llama_swap_port": 8090,
+    "backend_port": 3000,
+}
+
+DEFAULT_SETTINGS = DOCKER_DEFAULT_SETTINGS if IS_DOCKER else LOCAL_DEFAULT_SETTINGS
+
+
+def is_docker_managed_runtime() -> bool:
+    return IS_DOCKER or bool(os.environ.get("LLAMA_SWAP_URL"))
+
+
+def get_runtime_mode() -> str:
+    return "docker" if is_docker_managed_runtime() else "local"
 
 
 def get_llama_swap_executable() -> str:
@@ -83,6 +125,14 @@ def get_llama_swap_executable() -> str:
             "llama-swap somewhere in PATH."
         ),
     )
+
+
+def get_llama_swap_base_url() -> str:
+    """Resolve the base URL for talking to llama-swap."""
+    configured = os.environ.get("LLAMA_SWAP_URL", "").strip()
+    if configured:
+        return configured.rstrip("/")
+    return f"http://127.0.0.1:{settings['llama_swap_port']}"
 
 
 def load_settings() -> Dict[str, Any]:
@@ -134,6 +184,7 @@ class DownloadTask:
     error: Optional[str] = None
 
 active_downloads: Dict[str, DownloadTask] = {}
+docker_gpu_preflight_cache: Dict[str, Any] = {"checked_at": None, "result": None}
 
 
 def run_command(cmd: List[str], timeout: float = 30.0) -> subprocess.CompletedProcess:
@@ -162,24 +213,125 @@ def get_gpu_stats() -> Dict[str, Any]:
                 return {
                     "memory_used_gb": round(int(parts[0].strip()) / 1024, 1),
                     "memory_total_gb": round(int(parts[1].strip()) / 1024, 1),
-                    "temperature_c": int(parts[2].strip()) if len(parts) > 2 else 0
+                    "temperature_c": int(parts[2].strip()) if len(parts) > 2 else 0,
+                    "available": True,
                 }
-        return {"memory_used_gb": 0, "memory_total_gb": 0, "temperature_c": 0}
+        return {"memory_used_gb": 0, "memory_total_gb": 0, "temperature_c": 0, "available": False}
     except Exception:
-        return {"memory_used_gb": 0, "memory_total_gb": 0, "temperature_c": 0}
+        return {"memory_used_gb": 0, "memory_total_gb": 0, "temperature_c": 0, "available": False}
+
+
+def get_docker_gpu_preflight() -> Dict[str, Any]:
+    """Report whether Docker can expose an NVIDIA GPU to runtime containers."""
+    checked_at = docker_gpu_preflight_cache.get("checked_at")
+    if isinstance(checked_at, datetime) and datetime.now() - checked_at < timedelta(seconds=60):
+        cached = docker_gpu_preflight_cache.get("result")
+        if isinstance(cached, dict):
+            return cached
+
+    if IS_DOCKER:
+        preflight = {
+            "docker_installed": False,
+            "host_nvidia_smi": False,
+            "gpu_ready": False,
+            "state": "containerized",
+            "message": "Docker GPU preflight is only available from the host-side SwapDeck process.",
+            "details": [
+                "This SwapDeck instance is running inside Docker.",
+                "Use `docker run --rm --gpus all ... nvidia-smi -L` on the host to verify GPU passthrough.",
+            ],
+        }
+        docker_gpu_preflight_cache.update({"checked_at": datetime.now(), "result": preflight})
+        return preflight
+
+    docker_bin = shutil.which("docker")
+    nvidia_smi_bin = shutil.which("nvidia-smi")
+    preflight = {
+        "docker_installed": bool(docker_bin),
+        "host_nvidia_smi": bool(nvidia_smi_bin),
+        "gpu_ready": False,
+        "state": "unknown",
+        "message": "",
+        "details": [],
+    }
+
+    if not docker_bin:
+        preflight["state"] = "docker_missing"
+        preflight["message"] = "Docker is not installed or not in PATH."
+        docker_gpu_preflight_cache.update({"checked_at": datetime.now(), "result": preflight})
+        return preflight
+
+    if not nvidia_smi_bin:
+        preflight["state"] = "host_gpu_missing"
+        preflight["message"] = "NVIDIA GPU tools are not available on the host."
+        preflight["details"] = [
+            "Install NVIDIA drivers and confirm `nvidia-smi` works on the host."
+        ]
+        docker_gpu_preflight_cache.update({"checked_at": datetime.now(), "result": preflight})
+        return preflight
+
+    try:
+        docker_info = run_command(
+            ["docker", "info", "--format", "{{json .Runtimes}} {{json .CDISpecDirs}}"],
+            timeout=10.0,
+        )
+        info_text = (docker_info.stdout or "").strip()
+    except Exception as e:
+        preflight["state"] = "docker_unreachable"
+        preflight["message"] = "Docker is installed but not reachable from SwapDeck."
+        preflight["details"] = [str(e)]
+        docker_gpu_preflight_cache.update({"checked_at": datetime.now(), "result": preflight})
+        return preflight
+
+    runtimes_text = info_text.lower()
+    has_nvidia_runtime = '"nvidia"' in runtimes_text
+    has_cdi_dirs = "/etc/cdi" in info_text or "/var/run/cdi" in info_text
+    has_nvidia_ctk = bool(shutil.which("nvidia-ctk"))
+
+    try:
+        test = run_command(
+            ["docker", "run", "--rm", "--gpus", "all", "--entrypoint", "sh", "ghcr.io/ggml-org/llama.cpp:server-cuda", "-lc", "nvidia-smi -L"],
+            timeout=20.0,
+        )
+        if test.returncode == 0 and "GPU " in (test.stdout or ""):
+            preflight["gpu_ready"] = True
+            preflight["state"] = "ready"
+            preflight["message"] = "Docker GPU runtime is ready."
+            docker_gpu_preflight_cache.update({"checked_at": datetime.now(), "result": preflight})
+            return preflight
+
+        failure_text = "\n".join(filter(None, [(test.stdout or "").strip(), (test.stderr or "").strip()]))
+    except Exception as e:
+        failure_text = str(e)
+
+    preflight["state"] = "docker_gpu_not_ready"
+    preflight["message"] = "Docker is installed, but GPU passthrough is not configured."
+    preflight["details"] = [
+        "Host `nvidia-smi` works, but `docker run --gpus all ...` does not.",
+        f"NVIDIA Container Toolkit installed: {'yes' if has_nvidia_ctk else 'no'}",
+        f"Docker NVIDIA runtime registered: {'yes' if has_nvidia_runtime else 'no'}",
+        f"Docker CDI directories visible: {'yes' if has_cdi_dirs else 'no'}",
+    ]
+    if failure_text:
+        preflight["details"].append(f"Docker error: {failure_text}")
+    preflight["details"].append(
+        "Install and configure NVIDIA Container Toolkit on the host, then verify `docker run --gpus all ... nvidia-smi -L`."
+    )
+    docker_gpu_preflight_cache.update({"checked_at": datetime.now(), "result": preflight})
+    return preflight
 
 
 def is_llama_swap_running() -> bool:
     """Check if llama-swap is running via a lightweight endpoint."""
-    port = settings["llama_swap_port"]
+    base_url = get_llama_swap_base_url()
     try:
         logger.info("Checking if llama-swap is running...")
         # /v1/models avoids triggering expensive model health workflows that / may invoke.
-        response = requests.get(f"http://127.0.0.1:{port}/v1/models", timeout=2)
+        response = requests.get(f"{base_url}/v1/models", timeout=2)
         logger.info(f"llama-swap responded with status {response.status_code}")
         return response.status_code == 200
     except requests.ConnectionError:
-        logger.info(f"llama-swap not responding on port {port}")
+        logger.info(f"llama-swap not responding at {base_url}")
         return False
     except Exception as e:
         logger.error(f"Error checking llama-swap status: {e}")
@@ -188,6 +340,8 @@ def is_llama_swap_running() -> bool:
 
 def get_llama_swap_pid() -> Optional[int]:
     """Get the PID of the running llama-swap process"""
+    if IS_DOCKER or os.environ.get("LLAMA_SWAP_URL"):
+        return None
     try:
         llama_swap_bin = get_llama_swap_executable()
         result = run_command(["pgrep", "-f", llama_swap_bin])
@@ -201,39 +355,52 @@ def get_llama_swap_pid() -> Optional[int]:
 
 
 def start_llama_swap() -> Dict[str, Any]:
-    """Start llama-swap service in a visible terminal window"""
+    """Start llama-swap service locally or validate the Docker-managed runtime."""
     try:
         if is_llama_swap_running():
             return {"running": True, "pid": get_llama_swap_pid()}
 
-        # Launch llama-swap in a new visible terminal window
+        if IS_DOCKER or os.environ.get("LLAMA_SWAP_URL"):
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "llama-swap is managed outside SwapDeck in Docker mode. "
+                    "Make sure the llama-runtime service is up."
+                ),
+            )
+
         swap_dir = os.path.expanduser(settings["llama_swap_dir"])
         swap_config = os.path.expanduser(settings["llama_swap_config"])
         swap_port = settings["llama_swap_port"]
         llama_swap_bin = get_llama_swap_executable()
-        # Mirror llama-swap output to a log file so the Status page can show it.
-        cmd = (
-            f"cd {swap_dir} && "
-            f"{shlex.quote(llama_swap_bin)} --config {shlex.quote(swap_config)} "
-            f"--listen 0.0.0.0:{swap_port} 2>&1 | tee -a {shlex.quote(LLAMA_SWAP_LOG_FILE)}; "
-            "exec bash"
-        )
-        env = os.environ.copy()
-        env.setdefault("DISPLAY", ":0")
+        log_handle = open(LLAMA_SWAP_LOG_FILE, "a")
         process = subprocess.Popen(
-            ["gnome-terminal", "--title=llama-swap", "--", "bash", "-c", cmd],
+            [
+                llama_swap_bin,
+                "--config", swap_config,
+                "--listen", f"0.0.0.0:{swap_port}",
+            ],
+            cwd=swap_dir,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
             start_new_session=True,
-            env=env
         )
+        Path(LLAMA_SWAP_PROCESS_FILE).write_text(f"{process.pid}\n")
 
-        return {"running": True, "message": "llama-swap launched in new terminal"}
+        return {"running": True, "pid": process.pid, "message": "llama-swap started"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to start llama-swap: {str(e)}")
 
 
 def stop_llama_swap() -> Dict[str, Any]:
-    """Stop llama-swap and all child processes (including llama-server) and close terminal"""
+    """Stop llama-swap and child processes in local mode."""
     try:
+        if IS_DOCKER or os.environ.get("LLAMA_SWAP_URL"):
+            return {
+                "stopped": False,
+                "message": "llama-swap is Docker-managed in this mode. Stop the runtime container with Docker Compose.",
+            }
+
         llama_swap_bin = get_llama_swap_executable()
         # Kill llama-server first, then llama-swap
         for pattern in ["llama-server", llama_swap_bin]:
@@ -292,9 +459,9 @@ def get_upstream_logs(lines: int = 100) -> List[str]:
 
 def get_llama_swap_events(lines: int = 100) -> List[str]:
     """Fetch recent llama-swap events from its API, if available."""
-    port = settings["llama_swap_port"]
+    base_url = get_llama_swap_base_url()
     try:
-        response = requests.get(f"http://127.0.0.1:{port}/api/events", timeout=3)
+        response = requests.get(f"{base_url}/api/events", timeout=3)
         if response.status_code != 200:
             return []
 
@@ -416,6 +583,7 @@ def get_config() -> Dict[str, Any]:
 def save_config(config: Dict[str, Any]) -> Dict[str, Any]:
     """Save llama-swap configuration"""
     config_file = Path(os.path.expanduser(settings["llama_swap_config"]))
+    config_file.parent.mkdir(parents=True, exist_ok=True)
     
     with open(config_file, "w") as f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=False)
@@ -452,6 +620,7 @@ def save_config_raw(content: str) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="Config root must be a YAML mapping/object")
 
     try:
+        config_file.parent.mkdir(parents=True, exist_ok=True)
         config_file.write_text(content if content.endswith("\n") else f"{content}\n")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error saving raw config: {str(e)}")
@@ -462,7 +631,7 @@ def save_config_raw(content: str) -> Dict[str, Any]:
 def get_config_guide() -> str:
     """Get the bundled llama-swap config example used as a guide."""
     if not CONFIG_EXAMPLE_FILE.exists():
-        raise HTTPException(status_code=404, detail="Config guide file not found")
+        return FALLBACK_CONFIG_GUIDE
 
     try:
         return CONFIG_EXAMPLE_FILE.read_text()
@@ -490,9 +659,81 @@ class DownloadRequest(BaseModel):
     filename: str
 
 
+class AddModelToConfigRequest(BaseModel):
+    filename: str
+    config_key: Optional[str] = None
+    display_name: Optional[str] = None
+
+
 class TestPrompt(BaseModel):
     prompt: str
     model: str = ""
+
+
+def sanitize_model_id(value: str) -> str:
+    sanitized = re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-")
+    return sanitized or f"Model-{int(datetime.now().timestamp())}"
+
+
+def build_generated_model_entry(filename: str, display_name: Optional[str] = None) -> Dict[str, Any]:
+    model_path = f"/models/{filename}" if is_docker_managed_runtime() else str(
+        Path(os.path.expanduser(settings["gguf_directory"])) / filename
+    )
+    command_parts = [
+        "/app/llama-server" if is_docker_managed_runtime() else "llama-server",
+        f"-m {model_path}",
+        "--host 0.0.0.0" if is_docker_managed_runtime() else "--host 127.0.0.1",
+        "--port ${PORT}",
+        "-ngl 99",
+        "-fa on",
+        "-c 4096",
+    ]
+    return {
+        "name": display_name or Path(filename).stem,
+        "cmd": "\n".join(command_parts),
+        "proxy": "http://127.0.0.1:${PORT}",
+    }
+
+
+def add_model_to_config(filename: str, model_id: Optional[str] = None, display_name: Optional[str] = None) -> Dict[str, Any]:
+    model_path = Path(os.path.expanduser(settings["gguf_directory"])) / filename
+    if not model_path.exists():
+        raise HTTPException(status_code=404, detail="Model file not found")
+
+    config = get_config()
+    models = config.setdefault("models", {})
+
+    base_model_id = sanitize_model_id(model_id or Path(filename).stem)
+    final_model_id = base_model_id
+    suffix = 2
+    while final_model_id in models:
+        if models[final_model_id].get("cmd", "").find(filename) != -1:
+            raise HTTPException(status_code=409, detail=f"Model already configured as {final_model_id}")
+        final_model_id = f"{base_model_id}-{suffix}"
+        suffix += 1
+
+    if (
+        "ExampleModel" in models
+        and len(models) == 1
+        and "REPLACE_WITH_MODEL.gguf" in str(models["ExampleModel"].get("cmd", ""))
+    ):
+        models.pop("ExampleModel", None)
+
+    models[final_model_id] = build_generated_model_entry(filename, display_name)
+
+    health_check = config.get("healthCheck")
+    if not isinstance(health_check, dict) or not health_check.get("model") or health_check.get("model") == "ExampleModel":
+        config["healthCheck"] = {"model": final_model_id}
+
+    config.setdefault("globalTTL", 0)
+    config.setdefault("startPort", 5800)
+    save_config(config)
+
+    return {
+        "saved": True,
+        "model_id": final_model_id,
+        "display_name": models[final_model_id]["name"],
+    }
 
 
 class RawConfigRequest(BaseModel):
@@ -564,6 +805,16 @@ def api_get_config_guide():
     return {"content": get_config_guide()}
 
 
+@app.post("/api/config/add-model")
+def api_add_model_to_config(request: AddModelToConfigRequest):
+    """Append a discovered GGUF model to the active llama-swap config with generated defaults."""
+    return add_model_to_config(
+        filename=request.filename,
+        model_id=request.config_key,
+        display_name=request.display_name,
+    )
+
+
 @app.get("/api/status")
 def api_status():
     """Get llama-swap status and GPU stats"""
@@ -571,13 +822,18 @@ def api_status():
     running = is_llama_swap_running()
     pid = get_llama_swap_pid() if running else None
     gpu_stats = get_gpu_stats()
+    docker_gpu = get_docker_gpu_preflight()
     
-    logger.info(f"Status: running={running}, pid={pid}, gpu={gpu_stats}")
+    logger.info(f"Status: running={running}, pid={pid}, gpu={gpu_stats}, docker_gpu={docker_gpu.get('state')}")
     
     return {
         "running": running,
         "pid": pid,
-        "gpu": gpu_stats
+        "gpu": gpu_stats,
+        "docker_gpu": docker_gpu,
+        "runtime_mode": get_runtime_mode(),
+        "config_path": settings["llama_swap_config"],
+        "config_exists": Path(os.path.expanduser(settings["llama_swap_config"])).exists(),
     }
 
 
@@ -621,8 +877,7 @@ def api_stream_logs(stream_type: str):
     if stream_type not in {"proxy", "upstream"}:
         raise HTTPException(status_code=404, detail="Unknown stream type")
 
-    port = settings["llama_swap_port"]
-    target_url = f"http://127.0.0.1:{port}/logs/stream/{stream_type}"
+    target_url = f"{get_llama_swap_base_url()}/logs/stream/{stream_type}"
 
     def event_generator():
         try:
@@ -667,7 +922,7 @@ def api_test_prompt(prompt: TestPrompt):
 
         start = time.time()
         response = requests.post(
-            f"http://127.0.0.1:{settings['llama_swap_port']}/v1/chat/completions",
+            f"{get_llama_swap_base_url()}/v1/chat/completions",
             json=payload,
             timeout=120
         )
@@ -749,7 +1004,14 @@ async def websocket_download(websocket: WebSocket, task_id: str):
 @app.get("/api/settings")
 def api_get_settings():
     """Get current settings"""
-    return settings
+    return {
+        **settings,
+        "_meta": {
+            "runtime_mode": get_runtime_mode(),
+            "managed_runtime": is_docker_managed_runtime(),
+            "config_exists": Path(os.path.expanduser(settings["llama_swap_config"])).exists(),
+        },
+    }
 
 
 @app.put("/api/settings")

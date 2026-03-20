@@ -3,7 +3,11 @@ import { useState, useEffect } from 'react'
 export function useServiceStatus(pollMs = 10000) {
   const [status, setStatus] = useState({
     running: false,
-    pid: null
+    pid: null,
+    dockerGpu: null,
+    runtimeMode: 'local',
+    configExists: false,
+    configPath: '',
   })
 
   const refreshStatus = async () => {
@@ -13,10 +17,21 @@ export function useServiceStatus(pollMs = 10000) {
       const data = await response.json()
       setStatus({
         running: data.running || false,
-        pid: data.pid
+        pid: data.pid,
+        dockerGpu: data.docker_gpu || null,
+        runtimeMode: data.runtime_mode || 'local',
+        configExists: Boolean(data.config_exists),
+        configPath: data.config_path || '',
       })
     } catch (error) {
-      setStatus({ running: false, pid: null })
+      setStatus({
+        running: false,
+        pid: null,
+        dockerGpu: null,
+        runtimeMode: 'local',
+        configExists: false,
+        configPath: '',
+      })
     }
   }
 

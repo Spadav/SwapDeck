@@ -3,7 +3,7 @@ import { useServiceStatus } from '../hooks/useServiceStatus'
 import { useGpuStats } from '../hooks/useGpuStats'
 
 function StatusPage() {
-  const { running, pid, refreshStatus } = useServiceStatus(15000)
+  const { running, pid, dockerGpu, runtimeMode, configExists, configPath, refreshStatus } = useServiceStatus(15000)
   const gpuStats = useGpuStats(15000)
   const [proxyLogs, setProxyLogs] = useState([])
   const [upstreamLogs, setUpstreamLogs] = useState([])
@@ -37,13 +37,29 @@ function StatusPage() {
     ? proxyLogs.filter((line) => !line.includes('GET /v1/models'))
     : upstreamLogs
 
+  const dockerGpuTone = dockerGpu?.state === 'ready'
+    ? {
+        badge: 'bg-green-500',
+        border: 'rgba(34, 197, 94, 0.35)',
+        background: 'rgba(40, 167, 69, 0.10)'
+      }
+    : {
+        badge: 'bg-amber-500',
+        border: 'rgba(245, 158, 11, 0.35)',
+        background: 'rgba(245, 158, 11, 0.10)'
+      }
+
   const handleStart = async () => {
     try {
       setStarting(true)
-      await fetch('/api/service/start', { method: 'POST' })
+      const response = await fetch('/api/service/start', { method: 'POST' })
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}))
+        throw new Error(data.detail || 'Failed to start service')
+      }
       refreshStatus()
     } catch (error) {
-      alert('Failed to start service')
+      alert(error.message || 'Failed to start service')
     } finally {
       setStarting(false)
     }
@@ -52,10 +68,14 @@ function StatusPage() {
   const handleStop = async () => {
     try {
       setStopping(true)
-      await fetch('/api/service/stop', { method: 'POST' })
+      const response = await fetch('/api/service/stop', { method: 'POST' })
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}))
+        throw new Error(data.detail || 'Failed to stop service')
+      }
       refreshStatus()
     } catch (error) {
-      alert('Failed to stop service')
+      alert(error.message || 'Failed to stop service')
     } finally {
       setStopping(false)
     }
@@ -68,17 +88,17 @@ function StatusPage() {
         <div className="flex gap-2">
           <button
             onClick={handleStart}
-            disabled={running || starting}
+            disabled={runtimeMode === 'docker' || running || starting}
             className="btn btn-primary"
           >
-            {starting ? 'Starting...' : 'Start'}
+            {runtimeMode === 'docker' ? 'Managed by Docker' : starting ? 'Starting...' : 'Start'}
           </button>
           <button
             onClick={handleStop}
-            disabled={!running || stopping}
+            disabled={runtimeMode === 'docker' || !running || stopping}
             className="btn btn-danger"
           >
-            {stopping ? 'Stopping...' : 'Stop'}
+            {runtimeMode === 'docker' ? 'Stop via Compose' : stopping ? 'Stopping...' : 'Stop'}
           </button>
         </div>
       </div>
@@ -91,6 +111,9 @@ function StatusPage() {
             <span className="text-xl font-semibold">{running ? 'Running' : 'Stopped'}</span>
           </div>
           {pid && <p className="text-sm mt-1" style={{ color: 'var(--text-muted)' }}>PID: {pid}</p>}
+          <p className="text-sm mt-1" style={{ color: 'var(--text-muted)' }}>
+            Mode: {runtimeMode === 'docker' ? 'Docker-managed runtime' : 'Local process'}
+          </p>
         </div>
 
         <div className="card">
@@ -102,6 +125,49 @@ function StatusPage() {
             Temperature: {gpuStats.temperatureC}°C
           </p>
         </div>
+      </div>
+
+      <div className="card mb-6">
+        <h3 className="text-lg font-semibold mb-2">Runtime Config</h3>
+        <p className="font-medium">
+          {configExists ? 'Config file present' : 'Config file missing'}
+        </p>
+        <p className="text-sm mt-1" style={{ color: 'var(--text-muted)' }}>
+          {configPath || '-'}
+        </p>
+        {!configExists && (
+          <p className="text-sm mt-2" style={{ color: 'var(--text-muted)' }}>
+            Create or save a config before starting the runtime stack.
+          </p>
+        )}
+      </div>
+
+      <div
+        className="card mb-6"
+        style={{
+          borderColor: dockerGpuTone.border,
+          background: dockerGpuTone.background
+        }}
+      >
+        <div className="flex items-center gap-2 mb-2">
+          <span className={`w-3 h-3 rounded-full ${dockerGpuTone.badge}`}></span>
+          <h3 className="text-lg font-semibold">Docker GPU Preflight</h3>
+        </div>
+        <p className="font-medium">
+          {dockerGpu?.message || 'Checking Docker GPU runtime...'}
+        </p>
+        {dockerGpu?.state !== 'ready' && (
+          <p className="text-sm mt-2" style={{ color: 'var(--text-muted)' }}>
+            SwapDeck can run in Docker, but GPU-backed llama.cpp containers need host-level NVIDIA Container Toolkit support.
+          </p>
+        )}
+        {dockerGpu?.details?.length > 0 && (
+          <div className="mt-3 space-y-1 text-sm" style={{ color: 'var(--text-muted)' }}>
+            {dockerGpu.details.map((detail, index) => (
+              <div key={index}>- {detail}</div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="card">

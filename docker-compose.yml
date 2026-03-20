@@ -1,0 +1,38 @@
+services:
+  swapdeck:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: swapdeck
+    ports:
+      - "3000:3000"
+    environment:
+      SWAPDECK_DOCKER: "1"
+      LLAMA_SWAP_URL: "http://llama-runtime:8090"
+    volumes:
+      - ${SWAPDECK_MODELS_DIR:-./models}:/models
+      - ${SWAPDECK_CONFIG_DIR:-./config}:/config
+    depends_on:
+      - llama-runtime
+
+  llama-runtime:
+    build:
+      context: .
+      dockerfile: docker/llama-runtime/Dockerfile
+    container_name: llama-runtime
+    gpus: all
+    ports:
+      - "8090:8090"
+    volumes:
+      - ${SWAPDECK_MODELS_DIR:-./models}:/models
+      - ${SWAPDECK_CONFIG_DIR:-./config}:/config
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
