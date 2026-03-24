@@ -4,7 +4,9 @@ export function useGpuStats(pollMs = 10000) {
   const [stats, setStats] = useState({
     memoryUsedGb: 0,
     memoryTotalGb: 0,
-    temperatureC: 0
+    temperatureC: 0,
+    gpus: [],
+    count: 0,
   })
 
   useEffect(() => {
@@ -17,11 +19,13 @@ export function useGpuStats(pollMs = 10000) {
           setStats({
             memoryUsedGb: data.gpu.memory_used_gb ?? 0,
             memoryTotalGb: data.gpu.memory_total_gb ?? 0,
-            temperatureC: data.gpu.temperature_c ?? 0
+            temperatureC: data.gpu.temperature_c ?? 0,
+            gpus: Array.isArray(data.gpu.gpus) ? data.gpu.gpus : [],
+            count: Number(data.gpu.count || 0),
           })
         }
       } catch (error) {
-        setStats({ memoryUsedGb: 0, memoryTotalGb: 0, temperatureC: 0 })
+        setStats({ memoryUsedGb: 0, memoryTotalGb: 0, temperatureC: 0, gpus: [], count: 0 })
       }
     }
 

@@ -238,17 +238,6 @@ class DownloadTask:
 
 active_downloads: Dict[str, DownloadTask] = {}
 docker_gpu_preflight_cache: Dict[str, Any] = {"checked_at": None, "result": None}
-active_runtime_model_cache: Dict[str, Any] = {
-    "checked_at": None,
-    "result": {
-        "model_id": "",
-        "display_name": "",
-        "state": "unknown",
-        "source": "events",
-        "derived": True,
-        "last_event": "",
-    },
-}
 
 
 def run_command(cmd: List[str], timeout: float = 30.0) -> subprocess.CompletedProcess:
@@ -268,21 +257,61 @@ def run_command(cmd: List[str], timeout: float = 30.0) -> subprocess.CompletedPr
 
 
 def get_gpu_stats() -> Dict[str, Any]:
-    """Get NVIDIA GPU statistics using nvidia-smi"""
+    """Get NVIDIA GPU statistics using nvidia-smi."""
+    empty = {
+        "memory_used_gb": 0,
+        "memory_total_gb": 0,
+        "temperature_c": 0,
+        "available": False,
+        "gpus": [],
+        "count": 0,
+    }
+
     try:
-        result = run_command(["nvidia-smi", "--query-gpu=memory.used,memory.total,temperature.gpu", "--format=csv,noheader,nounits"])
-        if result.returncode == 0:
-            parts = result.stdout.strip().split(",")
-            if len(parts) >= 2:
-                return {
-                    "memory_used_gb": round(int(parts[0].strip()) / 1024, 1),
-                    "memory_total_gb": round(int(parts[1].strip()) / 1024, 1),
-                    "temperature_c": int(parts[2].strip()) if len(parts) > 2 else 0,
-                    "available": True,
-                }
-        return {"memory_used_gb": 0, "memory_total_gb": 0, "temperature_c": 0, "available": False}
+        result = run_command(
+            [
+                "nvidia-smi",
+                "--query-gpu=index,name,memory.used,memory.total,temperature.gpu",
+                "--format=csv,noheader,nounits",
+            ]
+        )
+        if result.returncode != 0:
+            return empty
+
+        gpus = []
+        for line in (result.stdout or "").splitlines():
+            parts = [part.strip() for part in line.split(",")]
+            if len(parts) < 5:
+                continue
+
+            try:
+                gpus.append(
+                    {
+                        "index": int(parts[0]),
+                        "name": parts[1],
+                        "memory_used_gb": round(int(parts[2]) / 1024, 1),
+                        "memory_total_gb": round(int(parts[3]) / 1024, 1),
+                        "temperature_c": int(parts[4]),
+                    }
+                )
+            except Exception:
+                continue
+
+        if not gpus:
+            return empty
+
+        primary = gpus[0]
+        return {
+            "memory_used_gb": sum(gpu["memory_used_gb"] for gpu in gpus),
+            "memory_total_gb": sum(gpu["memory_total_gb"] for gpu in gpus),
+            "temperature_c": primary["temperature_c"],
+            "available": True,
+            "gpus": gpus,
+            "count": len(gpus),
+            "primary_name": primary["name"],
+        }
     except Exception:
-        return {"memory_used_gb": 0, "memory_total_gb": 0, "temperature_c": 0, "available": False}
+        return empty
 
 
 def get_docker_gpu_preflight() -> Dict[str, Any]:
@@ -659,105 +688,6 @@ def get_llama_swap_events(lines: int = 100) -> List[str]:
         return []
 
 
-def extract_event_text(raw_line: str) -> str:
-    """Normalize llama-swap event payloads into plain text."""
-    text = (raw_line or "").strip()
-    if text.startswith("data:"):
-        text = text[5:].strip()
-
-    try:
-        payload = json.loads(text)
-        if isinstance(payload, dict):
-            inner = payload.get("data")
-            if isinstance(inner, str):
-                return inner
-            if inner is not None:
-                return json.dumps(inner)
-    except Exception:
-        pass
-
-    return text
-
-
-def get_active_runtime_model(lines: int = 250) -> Dict[str, Any]:
-    """Infer the currently active model from llama-swap runtime events."""
-    checked_at = active_runtime_model_cache.get("checked_at")
-    if isinstance(checked_at, datetime) and datetime.now() - checked_at < timedelta(seconds=5):
-        cached = active_runtime_model_cache.get("result")
-        if isinstance(cached, dict):
-            return cached
-
-    if is_docker_managed_runtime():
-        try:
-            events = get_docker_container_logs("runtime", lines)
-        except Exception:
-            events = get_llama_swap_events(lines)
-    else:
-        events = get_llama_swap_events(lines)
-    if not events:
-        cached = active_runtime_model_cache.get("result")
-        if isinstance(cached, dict):
-            return cached
-        result = {
-            "model_id": "",
-            "display_name": "",
-            "state": "unknown",
-            "source": "events",
-            "derived": True,
-            "last_event": "",
-        }
-        active_runtime_model_cache.update({"checked_at": datetime.now(), "result": result})
-        return result
-
-    try:
-        config_models = (get_config().get("models") or {})
-    except Exception:
-        config_models = {}
-
-    active_model_id = ""
-    last_event = ""
-
-    for raw_line in events:
-        line = extract_event_text(raw_line).replace('\\"', '"')
-
-        health_match = re.search(r"<([^>]+)>\s+Health check passed", line)
-        if health_match:
-            active_model_id = health_match.group(1).strip()
-            last_event = line
-            continue
-
-        unload_match = re.search(r"/api/models/unload/([A-Za-z0-9_.:-]+)", line)
-        if unload_match:
-            unloaded_model_id = unload_match.group(1).strip()
-            if unloaded_model_id == active_model_id:
-                active_model_id = ""
-            last_event = line
-
-    if not active_model_id:
-        result = {
-            "model_id": "",
-            "display_name": "",
-            "state": "idle",
-            "source": "events",
-            "derived": True,
-            "last_event": last_event,
-        }
-        active_runtime_model_cache.update({"checked_at": datetime.now(), "result": result})
-        return result
-
-    display_name = str((config_models.get(active_model_id) or {}).get("name") or active_model_id)
-    result = {
-        "model_id": active_model_id,
-        "display_name": display_name,
-        "state": "active",
-        "source": "events",
-        "derived": True,
-        "last_event": last_event,
-    }
-    active_runtime_model_cache.update({"checked_at": datetime.now(), "result": result})
-    return result
-
-
 def list_gguf_files() -> List[Dict[str, Any]]:
     """List all GGUF model files in the directory"""
     models = []
@@ -989,6 +919,8 @@ def get_runtime_gpu_stats() -> Dict[str, Any]:
         "temperature_c": 0,
         "available": bool(hardware.get("available")),
         "source": hardware.get("source"),
+        "gpus": [],
+        "count": 0,
     }
 
 
@@ -1126,6 +1058,22 @@ def build_launch_presets(filename: str) -> List[Dict[str, Any]]:
 
 
 def resolve_launch_preset(filename: str, preset_id: Optional[str]) -> Dict[str, Any]:
+    if preset_id == "custom":
+        family = get_model_file_info(filename)["family"]
+        return {
+            "id": "custom",
+            "name": "Custom",
+            "summary": "Minimal starter config for manual editing.",
+            "why_use": "Use this if you want full control over the llama.cpp flags yourself.",
+            "why_not": "Ignite will not choose context, KV cache, offload, or performance flags for you.",
+            "context": 0,
+            "gpu_layers": 0,
+            "flash_attention": False,
+            "kv_cache": None,
+            "batch": 0,
+            "ubatch": 0,
+            "template_mode": family,
+        }
     presets = build_launch_presets(filename)
     if not preset_id:
         return next((preset for preset in presets if preset["id"] == "balanced"), presets[0])
@@ -1145,15 +1093,19 @@ def build_generated_model_entry(filename: str, display_name: Optional[str] = Non
         f"-m {model_path}",
         "--host 0.0.0.0" if is_docker_managed_runtime() else "--host 127.0.0.1",
         "--port ${PORT}",
-        f"-ngl {preset['gpu_layers']}",
-        "-fa on" if preset["flash_attention"] else "-fa off",
-        f"-c {preset['context']}",
-        f"-b {preset['batch']}",
-        f"-ub {preset['ubatch']}",
     ]
-    if preset.get("kv_cache"):
-        command_parts.append(f"--cache-type-k {preset['kv_cache']['k']}")
-        command_parts.append(f"--cache-type-v {preset['kv_cache']['v']}")
+
+    if preset["id"] != "custom":
+        command_parts.extend([
+            f"-ngl {preset['gpu_layers']}",
+            "-fa on" if preset["flash_attention"] else "-fa off",
+            f"-c {preset['context']}",
+            f"-b {preset['batch']}",
+            f"-ub {preset['ubatch']}",
+        ])
+        if preset.get("kv_cache"):
+            command_parts.append(f"--cache-type-k {preset['kv_cache']['k']}")
+            command_parts.append(f"--cache-type-v {preset['kv_cache']['v']}")
 
     return {
         "name": display_name or Path(filename).stem,
@@ -1374,7 +1326,6 @@ def api_status():
     gpu_stats = get_runtime_gpu_stats()
     docker_gpu = get_docker_gpu_preflight()
     config_summary = get_config_summary()
-    active_runtime_model = get_active_runtime_model()
     
     logger.info(f"Status: running={running}, pid={pid}, gpu={gpu_stats}, docker_gpu={docker_gpu.get('state')}")
     
@@ -1390,7 +1341,6 @@ def api_status():
         "llama_swap_port": settings["llama_swap_port"],
         "config_path": settings["llama_swap_config"],
         "config_exists": Path(os.path.expanduser(settings["llama_swap_config"])).exists(),
-        "active_runtime_model": active_runtime_model,
         **config_summary,
     }
 

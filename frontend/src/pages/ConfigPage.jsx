@@ -63,9 +63,13 @@ function ConfigPage() {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [expandedModels, setExpandedModels] = useState({})
+  const [expandedFolders, setExpandedFolders] = useState({})
   const [deleteConfirm, setDeleteConfirm] = useState(null)
   const [message, setMessage] = useState(null)
   const [editorMode, setEditorMode] = useState('structured')
+  const [folderModal, setFolderModal] = useState(null)
+  const [folderNameDraft, setFolderNameDraft] = useState('')
+  const [folderSelectionDraft, setFolderSelectionDraft] = useState({})
 
   useEffect(() => {
     fetchConfig()
@@ -150,6 +154,10 @@ function ConfigPage() {
     setExpandedModels(prev => ({ ...prev, [key]: !prev[key] }))
   }
 
+  const toggleFolder = (folderName) => {
+    setExpandedFolders(prev => ({ ...prev, [folderName]: !(prev[folderName] ?? true) }))
+  }
+
   const handleModelChange = (modelKey, field, value) => {
     setConfig(prev => ({
       ...prev,
@@ -207,6 +215,107 @@ function ConfigPage() {
         }
       }
     }))
+  }
+
+  const getModelFolder = (model) => {
+    return String(model?.metadata?.igniteFolder || '').trim()
+  }
+
+  const getFolderGroups = () => {
+    const groups = {}
+    for (const [modelKey, model] of Object.entries(config?.models || {})) {
+      const folderName = getModelFolder(model) || 'Ungrouped'
+      if (!groups[folderName]) groups[folderName] = []
+      groups[folderName].push([modelKey, model])
+    }
+
+    return Object.entries(groups).sort(([a], [b]) => {
+      if (a === 'Ungrouped') return 1
+      if (b === 'Ungrouped') return -1
+      return a.localeCompare(b)
+    })
+  }
+
+  const openCreateFolderModal = () => {
+    const nextSelection = {}
+    for (const modelKey of Object.keys(config?.models || {})) {
+      nextSelection[modelKey] = false
+    }
+    setFolderModal({ mode: 'create', previousName: '' })
+    setFolderNameDraft('')
+    setFolderSelectionDraft(nextSelection)
+  }
+
+  const openManageFolderModal = (folderName) => {
+    const nextSelection = {}
+    for (const [modelKey, model] of Object.entries(config?.models || {})) {
+      nextSelection[modelKey] = getModelFolder(model) === folderName
+    }
+    setFolderModal({ mode: 'edit', previousName: folderName })
+    setFolderNameDraft(folderName)
+    setFolderSelectionDraft(nextSelection)
+  }
+
+  const closeFolderModal = () => {
+    setFolderModal(null)
+    setFolderNameDraft('')
+    setFolderSelectionDraft({})
+  }
+
+  const toggleFolderSelection = (modelKey) => {
+    setFolderSelectionDraft(prev => ({ ...prev, [modelKey]: !prev[modelKey] }))
+  }
+
+  const saveFolderModal = () => {
+    const trimmedName = folderNameDraft.trim()
+    if (!trimmedName) {
+      setMessage({ type: 'error', text: 'Folder name cannot be empty' })
+      return
+    }
+
+    const previousName = folderModal?.previousName || ''
+    const nextModels = {}
+
+    for (const [modelKey, model] of Object.entries(config?.models || {})) {
+      const currentFolder = getModelFolder(model)
+      const selected = Boolean(folderSelectionDraft[modelKey])
+      const nextMetadata = { ...(model.metadata || {}) }
+
+      if (selected) {
+        nextMetadata.igniteFolder = trimmedName
+      } else if (currentFolder === trimmedName || (previousName && currentFolder === previousName)) {
+        delete nextMetadata.igniteFolder
+      }
+
+      nextModels[modelKey] = {
+        ...model,
+        ...(Object.keys(nextMetadata).length > 0 ? { metadata: nextMetadata } : { metadata: undefined }),
+      }
+    }
+
+    setConfig(prev => ({ ...prev, models: nextModels }))
+    setExpandedFolders(prev => ({ ...prev, [trimmedName]: true }))
+    closeFolderModal()
+  }
+
+  const removeFolder = (folderName) => {
+    const nextModels = {}
+    for (const [modelKey, model] of Object.entries(config?.models || {})) {
+      const currentFolder = getModelFolder(model)
+      if (currentFolder !== folderName) {
+        nextModels[modelKey] = model
+        continue
+      }
+
+      const nextMetadata = { ...(model.metadata || {}) }
+      delete nextMetadata.igniteFolder
+      nextModels[modelKey] = {
+        ...model,
+        ...(Object.keys(nextMetadata).length > 0 ? { metadata: nextMetadata } : { metadata: undefined }),
+      }
+    }
+
+    setConfig(prev => ({ ...prev, models: nextModels }))
   }
 
   const removeAliases = (modelKey) => {
@@ -280,6 +389,7 @@ function ConfigPage() {
   if (!config) return <p className="p-6 text-red-500">Config file not found</p>
 
   const inputClass = 'w-full px-3 py-2 rounded-lg border bg-transparent'
+  const folderGroups = getFolderGroups()
 
   return (
     <div className="p-6">
@@ -397,6 +507,78 @@ function ConfigPage() {
         </div>
       )}
 
+      {folderModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          style={{ background: 'rgba(8, 10, 14, 0.7)' }}
+          onClick={closeFolderModal}
+        >
+          <div
+            className="card w-full max-w-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-4 mb-4">
+              <div>
+                <h3 className="text-xl font-semibold">
+                  {folderModal.mode === 'create' ? 'Create Folder' : 'Manage Folder'}
+                </h3>
+                <p className="text-sm mt-1" style={{ color: 'var(--text-muted)' }}>
+                  Visual folders only. They do not affect llama-swap runtime behavior.
+                </p>
+              </div>
+              <button
+                onClick={closeFolderModal}
+                className="px-3 py-2 rounded-lg text-sm"
+                style={{ background: 'var(--line-soft)' }}
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium mb-1">Folder Name</label>
+                <input
+                  type="text"
+                  value={folderNameDraft}
+                  onChange={(e) => setFolderNameDraft(e.target.value)}
+                  className={inputClass}
+                  placeholder="Coding"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium mb-2">Configs In This Folder</label>
+                <div className="max-h-72 overflow-auto rounded-lg border p-3 space-y-2" style={{ borderColor: 'var(--line-soft)' }}>
+                  {Object.entries(config?.models || {}).map(([modelKey, model]) => (
+                    <label key={modelKey} className="flex items-start gap-3 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(folderSelectionDraft[modelKey])}
+                        onChange={() => toggleFolderSelection(modelKey)}
+                      />
+                      <div>
+                        <div className="font-medium">{modelKey}</div>
+                        <div className="text-sm" style={{ color: 'var(--text-muted)' }}>{model.name || modelKey}</div>
+                      </div>
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-3">
+                <button onClick={closeFolderModal} className="btn btn-secondary text-sm">
+                  Cancel
+                </button>
+                <button onClick={saveFolderModal} className="btn btn-primary text-sm">
+                  Save Folder
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {editorMode === 'raw' ? (
         <div className="card">
           <div className="flex items-center justify-between mb-4">
@@ -452,176 +634,214 @@ function ConfigPage() {
           <div className="mt-6">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-lg font-semibold">Models ({Object.keys(config.models || {}).length})</h3>
-              <button onClick={addModel} className="btn btn-primary text-sm">+ Add Model</button>
+              <div className="flex items-center gap-2">
+                <button onClick={openCreateFolderModal} className="btn btn-secondary text-sm">+ Create Folder</button>
+                <button onClick={addModel} className="btn btn-primary text-sm">+ Add Model</button>
+              </div>
             </div>
 
             <div className="space-y-3">
-              {Object.entries(config.models || {}).map(([key, model]) => {
-                const stripParamsValue = model.filters?.stripParams ?? model.filters?.strip_params ?? ''
-                const requestMode = model.metadata?.igniteRequestMode ?? model.metadata?.igniteTemplateMode ?? 'chat'
-
-                return (
-                  <div key={key} className="card">
+              {folderGroups.map(([folderName, modelsInFolder]) => (
+                <div key={folderName} className="card">
+                  <div className="flex items-center justify-between gap-4">
                     <button
-                      onClick={() => toggleModel(key)}
-                      className="w-full flex items-center justify-between text-left"
+                      onClick={() => toggleFolder(folderName)}
+                      className="flex-1 flex items-center justify-between text-left"
                     >
                       <div>
-                        <span className="font-semibold text-lg">{key}</span>
+                        <span className="font-semibold text-lg">{folderName}</span>
                         <span className="ml-3 text-sm" style={{ color: 'var(--text-muted)' }}>
-                          {model.name}
+                          {modelsInFolder.length} config{modelsInFolder.length === 1 ? '' : 's'}
                         </span>
                       </div>
                       <span className="text-xl" style={{ color: 'var(--text-muted)' }}>
-                        {expandedModels[key] ? '▼' : '▶'}
+                        {(expandedFolders[folderName] ?? true) ? '▼' : '▶'}
                       </span>
                     </button>
-
-                    {expandedModels[key] && (
-                      <div className="mt-4 space-y-4 border-t pt-4" style={{ borderColor: 'var(--line-soft)' }}>
-                        <div>
-                          <label className="block text-sm font-medium mb-1">Model Key</label>
-                          <input
-                            type="text"
-                            defaultValue={key}
-                            onBlur={(e) => renameModelKey(key, e.target.value.trim())}
-                            className={inputClass}
-                          />
-                        </div>
-
-                        <div>
-                          <label className="block text-sm font-medium mb-1">Name</label>
-                          <input
-                            type="text"
-                            value={model.name || ''}
-                            onChange={(e) => handleModelChange(key, 'name', e.target.value)}
-                            className={inputClass}
-                          />
-                        </div>
-
-                        <div>
-                          <label className="block text-sm font-medium mb-1">Command</label>
-                          <textarea
-                            value={model.cmd || ''}
-                            onChange={(e) => handleModelChange(key, 'cmd', e.target.value)}
-                            rows={8}
-                            className={`${inputClass} font-mono text-sm`}
-                          />
-                        </div>
-
-                        <div>
-                          <label className="block text-sm font-medium mb-1">Proxy</label>
-                          <input
-                            type="text"
-                            value={model.proxy || ''}
-                            onChange={(e) => handleModelChange(key, 'proxy', e.target.value)}
-                            className={`${inputClass} font-mono text-sm`}
-                          />
-                        </div>
-
-                        <div>
-                          <label className="block text-sm font-medium mb-1">Request Mode</label>
-                          <select
-                            value={requestMode}
-                            onChange={(e) => handleRequestModeChange(key, e.target.value)}
-                            className={inputClass}
-                          >
-                            <option value="chat">Chat</option>
-                            <option value="completion">Completion</option>
-                          </select>
-                          <p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
-                            Use Chat for instruct/conversation models. Use Completion for code or continuation models like StarCoder.
-                          </p>
-                        </div>
-
-                        {model.filters ? (
-                          <div>
-                            <div className="flex items-center justify-between mb-1">
-                              <label className="block text-sm font-medium">Filters (stripParams)</label>
-                              <button
-                                onClick={() => removeFilters(key)}
-                                className="text-xs text-red-500 hover:text-red-700"
-                              >
-                                Remove filters
-                              </button>
-                            </div>
-                            <input
-                              type="text"
-                              value={stripParamsValue}
-                              onChange={(e) => handleFilterChange(key, e.target.value)}
-                              placeholder="temperature, top_k, top_p"
-                              className={`${inputClass} text-sm`}
-                            />
-                          </div>
-                        ) : (
-                          <button
-                            onClick={() => handleFilterChange(key, '')}
-                            className="text-sm text-blue-500 hover:text-blue-700"
-                          >
-                            + Add filters
-                          </button>
-                        )}
-
-                        {model.aliases ? (
-                          <div>
-                            <div className="flex items-center justify-between mb-1">
-                              <label className="block text-sm font-medium">Aliases (comma-separated)</label>
-                              <button
-                                onClick={() => removeAliases(key)}
-                                className="text-xs text-red-500 hover:text-red-700"
-                              >
-                                Remove aliases
-                              </button>
-                            </div>
-                            <input
-                              type="text"
-                              value={(model.aliases || []).join(', ')}
-                              onChange={(e) => handleAliasesChange(key, e.target.value)}
-                              placeholder="alias-1, alias-2"
-                              className={`${inputClass} text-sm`}
-                            />
-                          </div>
-                        ) : (
-                          <button
-                            onClick={() => handleModelChange(key, 'aliases', [''])}
-                            className="text-sm text-blue-500 hover:text-blue-700"
-                          >
-                            + Add aliases
-                          </button>
-                        )}
-
-                        <div className="pt-2 border-t" style={{ borderColor: 'var(--line-soft)' }}>
-                          {deleteConfirm === key ? (
-                            <div className="flex items-center gap-3">
-                              <span className="text-sm text-red-500">Delete this model?</span>
-                              <button
-                                onClick={() => deleteModel(key)}
-                                className="text-sm px-3 py-1 bg-red-600 text-white rounded hover:bg-red-700"
-                              >
-                                Confirm
-                              </button>
-                              <button
-                                onClick={() => setDeleteConfirm(null)}
-                                className="text-sm px-3 py-1 rounded"
-                                style={{ background: 'var(--line-soft)' }}
-                              >
-                                Cancel
-                              </button>
-                            </div>
-                          ) : (
-                            <button
-                              onClick={() => setDeleteConfirm(key)}
-                              className="text-sm text-red-500 hover:text-red-700"
-                            >
-                              Delete model
-                            </button>
-                          )}
-                        </div>
+                    {folderName !== 'Ungrouped' && (
+                      <div className="flex items-center gap-2">
+                        <button onClick={() => openManageFolderModal(folderName)} className="btn btn-secondary text-sm">
+                          Manage
+                        </button>
+                        <button onClick={() => removeFolder(folderName)} className="btn text-sm">
+                          Remove
+                        </button>
                       </div>
                     )}
                   </div>
-                )
-              })}
+
+                  {(expandedFolders[folderName] ?? true) && (
+                    <div className="mt-4 space-y-3 border-t pt-4" style={{ borderColor: 'var(--line-soft)' }}>
+                      {modelsInFolder.map(([key, model]) => {
+                        const stripParamsValue = model.filters?.stripParams ?? model.filters?.strip_params ?? ''
+                        const requestMode = model.metadata?.igniteRequestMode ?? model.metadata?.igniteTemplateMode ?? 'chat'
+
+                        return (
+                          <div key={key} className="rounded-lg border p-4" style={{ borderColor: 'var(--line-soft)' }}>
+                            <button
+                              onClick={() => toggleModel(key)}
+                              className="w-full flex items-center justify-between text-left"
+                            >
+                              <div>
+                                <span className="font-semibold text-lg">{key}</span>
+                                <span className="ml-3 text-sm" style={{ color: 'var(--text-muted)' }}>
+                                  {model.name}
+                                </span>
+                              </div>
+                              <span className="text-xl" style={{ color: 'var(--text-muted)' }}>
+                                {expandedModels[key] ? '▼' : '▶'}
+                              </span>
+                            </button>
+
+                            {expandedModels[key] && (
+                              <div className="mt-4 space-y-4 border-t pt-4" style={{ borderColor: 'var(--line-soft)' }}>
+                                <div>
+                                  <label className="block text-sm font-medium mb-1">Model Key</label>
+                                  <input
+                                    type="text"
+                                    defaultValue={key}
+                                    onBlur={(e) => renameModelKey(key, e.target.value.trim())}
+                                    className={inputClass}
+                                  />
+                                </div>
+
+                                <div>
+                                  <label className="block text-sm font-medium mb-1">Name</label>
+                                  <input
+                                    type="text"
+                                    value={model.name || ''}
+                                    onChange={(e) => handleModelChange(key, 'name', e.target.value)}
+                                    className={inputClass}
+                                  />
+                                </div>
+
+                                <div>
+                                  <label className="block text-sm font-medium mb-1">Command</label>
+                                  <textarea
+                                    value={model.cmd || ''}
+                                    onChange={(e) => handleModelChange(key, 'cmd', e.target.value)}
+                                    rows={8}
+                                    className={`${inputClass} font-mono text-sm`}
+                                  />
+                                </div>
+
+                                <div>
+                                  <label className="block text-sm font-medium mb-1">Proxy</label>
+                                  <input
+                                    type="text"
+                                    value={model.proxy || ''}
+                                    onChange={(e) => handleModelChange(key, 'proxy', e.target.value)}
+                                    className={`${inputClass} font-mono text-sm`}
+                                  />
+                                </div>
+
+                                <div>
+                                  <label className="block text-sm font-medium mb-1">Request Mode</label>
+                                  <select
+                                    value={requestMode}
+                                    onChange={(e) => handleRequestModeChange(key, e.target.value)}
+                                    className={inputClass}
+                                  >
+                                    <option value="chat">Chat</option>
+                                    <option value="completion">Completion</option>
+                                  </select>
+                                  <p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
+                                    Use Chat for instruct/conversation models. Use Completion for code or continuation models like StarCoder.
+                                  </p>
+                                </div>
+
+                                {model.filters ? (
+                                  <div>
+                                    <div className="flex items-center justify-between mb-1">
+                                      <label className="block text-sm font-medium">Filters (stripParams)</label>
+                                      <button
+                                        onClick={() => removeFilters(key)}
+                                        className="text-xs text-red-500 hover:text-red-700"
+                                      >
+                                        Remove filters
+                                      </button>
+                                    </div>
+                                    <input
+                                      type="text"
+                                      value={stripParamsValue}
+                                      onChange={(e) => handleFilterChange(key, e.target.value)}
+                                      placeholder="temperature, top_k, top_p"
+                                      className={`${inputClass} text-sm`}
+                                    />
+                                  </div>
+                                ) : (
+                                  <button
+                                    onClick={() => handleFilterChange(key, '')}
+                                    className="text-sm text-blue-500 hover:text-blue-700"
+                                  >
+                                    + Add filters
+                                  </button>
+                                )}
+
+                                {model.aliases ? (
+                                  <div>
+                                    <div className="flex items-center justify-between mb-1">
+                                      <label className="block text-sm font-medium">Aliases (comma-separated)</label>
+                                      <button
+                                        onClick={() => removeAliases(key)}
+                                        className="text-xs text-red-500 hover:text-red-700"
+                                      >
+                                        Remove aliases
+                                      </button>
+                                    </div>
+                                    <input
+                                      type="text"
+                                      value={(model.aliases || []).join(', ')}
+                                      onChange={(e) => handleAliasesChange(key, e.target.value)}
+                                      placeholder="alias-1, alias-2"
+                                      className={`${inputClass} text-sm`}
+                                    />
+                                  </div>
+                                ) : (
+                                  <button
+                                    onClick={() => handleModelChange(key, 'aliases', [''])}
+                                    className="text-sm text-blue-500 hover:text-blue-700"
+                                  >
+                                    + Add aliases
+                                  </button>
+                                )}
+
+                                <div className="pt-2 border-t" style={{ borderColor: 'var(--line-soft)' }}>
+                                  {deleteConfirm === key ? (
+                                    <div className="flex items-center gap-3">
+                                      <span className="text-sm text-red-500">Delete this model?</span>
+                                      <button
+                                        onClick={() => deleteModel(key)}
+                                        className="text-sm px-3 py-1 bg-red-600 text-white rounded hover:bg-red-700"
+                                      >
+                                        Confirm
+                                      </button>
+                                      <button
+                                        onClick={() => setDeleteConfirm(null)}
+                                        className="text-sm px-3 py-1 rounded"
+                                        style={{ background: 'var(--line-soft)' }}
+                                      >
+                                        Cancel
+                                      </button>
+                                    </div>
+                                  ) : (
+                                    <button
+                                      onClick={() => setDeleteConfirm(key)}
+                                      className="text-sm text-red-500 hover:text-red-700"
+                                    >
+                                      Delete model
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+                </div>
+              ))}
             </div>
           </div>
         </>

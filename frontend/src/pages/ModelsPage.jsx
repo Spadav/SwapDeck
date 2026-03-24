@@ -207,7 +207,7 @@ function ModelsPage() {
               <div>
                 <h3 className="text-xl font-semibold">Choose Launch Profile</h3>
                 <p className="text-sm mt-1" style={{ color: 'var(--text-muted)' }}>
-                  Ignite generated these presets for {presetPicker.filename} using your detected hardware.
+                  Ignite generated these presets for {presetPicker.filename} using your detected hardware. These are general suggestions, not guaranteed best settings. Test and adjust them to find the right VRAM, speed, and context tradeoff for your workload.
                 </p>
               </div>
               <button
@@ -225,7 +225,7 @@ function ModelsPage() {
               </div>
             )}
 
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 lg:grid-cols-4 gap-4">
               {presetPicker.presets.map((preset) => (
                 <div
                   key={preset.id}
@@ -258,6 +258,29 @@ function ModelsPage() {
                   </button>
                 </div>
               ))}
+
+              <div
+                className="rounded-lg border p-4 space-y-3"
+                style={{ borderColor: 'var(--line-soft)', background: 'rgba(148, 163, 184, 0.08)' }}
+              >
+                <div>
+                  <h4 className="text-lg font-semibold">Custom</h4>
+                  <p className="text-sm mt-1" style={{ color: 'var(--text-muted)' }}>
+                    Minimal starter config for manual editing.
+                  </p>
+                </div>
+                <div className="text-sm">
+                  <p><span className="font-medium">Why use:</span> You want full control over llama.cpp flags and prefer editing the config yourself.</p>
+                  <p className="mt-2"><span className="font-medium">Why not:</span> Ignite will not choose context, KV cache, offload, or performance flags for you.</p>
+                </div>
+                <button
+                  onClick={() => submitAddToConfig(presetPicker.filename, 'custom')}
+                  disabled={configuringModel === presetPicker.filename}
+                  className="btn btn-primary text-sm w-full"
+                >
+                  {configuringModel === presetPicker.filename ? 'Adding...' : 'Use Custom'}
+                </button>
+              </div>
             </div>
           </div>
         </div>

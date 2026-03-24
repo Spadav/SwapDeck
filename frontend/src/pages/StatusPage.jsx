@@ -19,7 +19,6 @@ function StatusPage() {
     configuredModelIds,
     defaultModelId,
     defaultModelMode,
-    activeRuntimeModel,
     refreshStatus
   } = useServiceStatus(15000)
   const gpuStats = useGpuStats(15000)
@@ -104,9 +103,7 @@ function StatusPage() {
   -H "Content-Type: application/json" \\
   -d '{"model":"${sampleModelId}","messages":[{"role":"user","content":"hi"}]}'`
 
-  const activeModelState = activeRuntimeModel?.state || 'unknown'
-  const activeModelDisplay = activeRuntimeModel?.display_name || activeRuntimeModel?.model_id || ''
-  const activeModelSource = activeRuntimeModel?.derived ? 'Derived from runtime events' : 'Reported by runtime'
+  const formatGiB = (value) => Number(value || 0).toFixed(1).replace(/\.0$/, '')
 
   return (
     <div className="p-6">
@@ -160,31 +157,39 @@ function StatusPage() {
 
         <div className="card">
           <h3 className="text-lg font-semibold mb-2">GPU Status</h3>
-          <p className="text-xl font-semibold">
-            {gpuStats.memoryUsedGb} / {gpuStats.memoryTotalGb} GiB
-          </p>
-          <p className="text-sm mt-1" style={{ color: 'var(--text-muted)' }}>
-            Temperature: {gpuStats.temperatureC}°C
-          </p>
-        </div>
-
-        <div className="card">
-          <h3 className="text-lg font-semibold mb-2">Current Active Model</h3>
-          {activeModelState === 'active' ? (
+          {gpuStats.count > 1 ? (
             <>
-              <p className="text-xl font-semibold">{activeModelDisplay}</p>
-              <p className="text-sm mt-1 font-mono" style={{ color: 'var(--text-muted)' }}>
-                {activeRuntimeModel?.model_id}
+              <p className="text-xl font-semibold">
+                {formatGiB(gpuStats.memoryUsedGb)} / {formatGiB(gpuStats.memoryTotalGb)} GiB
               </p>
+              <p className="text-sm mt-1" style={{ color: 'var(--text-muted)' }}>
+                {gpuStats.count} GPUs detected
+              </p>
+              <div className="mt-3 grid grid-cols-1 xl:grid-cols-2 gap-2">
+                {gpuStats.gpus.map((gpu) => (
+                  <div
+                    key={gpu.index}
+                    className="rounded-lg border p-3"
+                    style={{ borderColor: 'var(--line-soft)', background: 'rgba(148, 163, 184, 0.08)' }}
+                  >
+                    <div className="font-medium">GPU {gpu.index}: {gpu.name}</div>
+                    <div className="text-sm mt-1" style={{ color: 'var(--text-muted)' }}>
+                      {formatGiB(gpu.memory_used_gb)} / {formatGiB(gpu.memory_total_gb)} GiB • {gpu.temperature_c}°C
+                    </div>
+                  </div>
+                ))}
+              </div>
             </>
           ) : (
-            <p className="text-xl font-semibold">
-              {running ? 'No active model detected' : 'Runtime offline'}
-            </p>
+            <>
+              <p className="text-xl font-semibold">
+                {formatGiB(gpuStats.memoryUsedGb)} / {formatGiB(gpuStats.memoryTotalGb)} GiB
+              </p>
+              <p className="text-sm mt-1" style={{ color: 'var(--text-muted)' }}>
+                Temperature: {gpuStats.temperatureC}°C
+              </p>
+            </>
           )}
-          <p className="text-sm mt-1" style={{ color: 'var(--text-muted)' }}>
-            {activeModelSource}
-          </p>
         </div>
       </div>
 
