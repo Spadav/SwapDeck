@@ -65,9 +65,26 @@ Then open:
 What `start.sh` does:
 - checks Docker
 - prepares `./config` and `./models`
+- runs `docker compose up -d`
+
+If you changed code, Dockerfiles, or dependencies and need fresh containers, use:
+
+```bash
+./scripts/rebuild.sh
+```
+
+What `rebuild.sh` does:
+- checks Docker
+- prepares `./config` and `./models`
 - runs `docker compose up -d --build`
 
 If you prefer to avoid helper scripts, you can start Ignite manually:
+
+```bash
+docker compose up -d
+```
+
+To rebuild manually:
 
 ```bash
 docker compose up -d --build
@@ -89,7 +106,13 @@ After changing ports, restart Ignite.
 ```
 
 What `stop.sh` does:
-- runs `docker compose down`
+- runs `docker compose stop`
+
+If you want to fully remove the containers instead of just stopping them:
+
+```bash
+docker compose down
+```
 
 ## Update
 
@@ -101,6 +124,20 @@ What `update.sh` does:
 - pulls the latest Git changes
 - pulls the latest runtime images
 - rebuilds and restarts the stack
+
+## Restart Behavior
+
+By default Ignite uses Docker restart policy:
+
+```bash
+IGNITE_RESTART_POLICY=no
+```
+
+That means:
+- containers do not restart automatically unless you enable it
+- the recommended way to change this is from the Ignite Settings page
+
+Advanced users can still override it in `.env` if they want a different Docker restart policy.
 
 ## Default Folders
 
@@ -122,6 +159,7 @@ SWAPDECK_MODELS_DIR=/path/to/models
 SWAPDECK_CONFIG_DIR=/path/to/config
 IGNITE_PORT=3000
 LLAMA_SWAP_PORT=8090
+IGNITE_RESTART_POLICY=no
 ```
 
 ## First Run

@@ -11,6 +11,7 @@ import glob
 import shutil
 import subprocess
 import logging
+from functools import lru_cache
 from pathlib import Path
 from typing import Optional, Dict, List, Any
 from dataclasses import dataclass, field
@@ -89,6 +90,7 @@ LOCAL_DEFAULT_SETTINGS = {
     "llama_swap_port": 8090,
     "backend_port": 8091,
     "advanced_gpu_mode": False,
+    "restart_on_boot": False,
 }
 
 DOCKER_IGNITE_PORT = int(os.environ.get("IGNITE_PORT", "3000"))
@@ -101,6 +103,7 @@ DOCKER_DEFAULT_SETTINGS = {
     "llama_swap_port": DOCKER_LLAMA_SWAP_PORT,
     "backend_port": DOCKER_IGNITE_PORT,
     "advanced_gpu_mode": False,
+    "restart_on_boot": False,
 }
 
 DEFAULT_SETTINGS = DOCKER_DEFAULT_SETTINGS if IS_DOCKER else LOCAL_DEFAULT_SETTINGS
@@ -152,6 +155,43 @@ def get_docker_log_container_map() -> Dict[str, str]:
         "runtime": DOCKER_RUNTIME_CONTAINER,
         "llmfit": DOCKER_SUPPORT_CONTAINERS[0] if DOCKER_SUPPORT_CONTAINERS else "llmfit",
     }
+
+
+def get_docker_restart_policy_name() -> Optional[str]:
+    client = get_docker_client()
+    if client is None:
+        return None
+
+    try:
+        runtime = client.containers.get(DOCKER_RUNTIME_CONTAINER)
+        policy = (((runtime.attrs or {}).get("HostConfig") or {}).get("RestartPolicy") or {}).get("Name")
+        return policy or "no"
+    except Exception:
+        return None
+
+
+def apply_docker_restart_policy(enabled: bool) -> None:
+    client = get_docker_client()
+    if client is None:
+        raise HTTPException(status_code=503, detail="Docker runtime control is not available.")
+
+    policy_name = "unless-stopped" if enabled else "no"
+    policy = {"Name": policy_name}
+
+    container_names = ["ignite", DOCKER_RUNTIME_CONTAINER, *DOCKER_SUPPORT_CONTAINERS]
+    errors = []
+    for container_name in container_names:
+        try:
+            container = client.containers.get(container_name)
+            container.update(restart_policy=policy)
+        except Exception as exc:
+            errors.append(f"{container_name}: {exc}")
+
+    if errors:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to update Docker restart policy: " + "; ".join(errors),
+        )
 
 
 def get_llama_swap_executable() -> str:
@@ -251,6 +291,7 @@ class DownloadTask:
 
 active_downloads: Dict[str, DownloadTask] = {}
 docker_gpu_preflight_cache: Dict[str, Any] = {"checked_at": None, "result": None}
+updates_cache: Dict[str, Any] = {"checked_at": None, "result": None}
 
 
 def run_command(cmd: List[str], timeout: float = 30.0) -> subprocess.CompletedProcess:
@@ -267,6 +308,183 @@ def run_command(cmd: List[str], timeout: float = 30.0) -> subprocess.CompletedPr
         raise HTTPException(status_code=504, detail=f"Command timed out: {' '.join(cmd)}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Command failed: {str(e)}")
+
+
+@lru_cache(maxsize=1)
+def get_repo_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def read_text_if_exists(path: Path) -> str:
+    try:
+        return path.read_text()
+    except Exception:
+        return ""
+
+
+def parse_current_runtime_refs() -> Dict[str, Any]:
+    env_ignite_version = os.environ.get("IGNITE_APP_VERSION", "").strip()
+    env_llama_cpp_image = os.environ.get("LLAMA_CPP_IMAGE_REF", "").strip()
+    env_llama_swap_version = os.environ.get("LLAMA_SWAP_VERSION_REF", "").strip()
+    env_llmfit_image = os.environ.get("LLMFIT_IMAGE_REF", "").strip()
+
+    repo_root = get_repo_root()
+    runtime_dockerfile = read_text_if_exists(repo_root / "docker" / "llama-runtime" / "Dockerfile")
+    compose_yaml = read_text_if_exists(repo_root / "docker-compose.yml")
+    frontend_package = read_text_if_exists(repo_root / "frontend" / "package.json")
+
+    llama_cpp_image = None
+    llama_swap_version = None
+    llmfit_image = None
+    ignite_version = None
+
+    image_match = re.search(r"ARG\s+LLAMA_CPP_IMAGE=(.+)", runtime_dockerfile)
+    if image_match:
+        llama_cpp_image = image_match.group(1).strip()
+
+    swap_match = re.search(r"ARG\s+LLAMA_SWAP_VERSION=(.+)", runtime_dockerfile)
+    if swap_match:
+        llama_swap_version = swap_match.group(1).strip()
+
+    llmfit_match = re.search(r"image:\s*(ghcr\.io/alexsjones/llmfit:[^\s]+)", compose_yaml)
+    if llmfit_match:
+        llmfit_image = llmfit_match.group(1).strip()
+
+    try:
+        package_data = json.loads(frontend_package) if frontend_package else {}
+        ignite_version = package_data.get("version")
+    except Exception:
+        ignite_version = None
+
+    return {
+        "ignite_version": env_ignite_version or ignite_version or "unknown",
+        "llama_cpp_image": env_llama_cpp_image or llama_cpp_image or "ghcr.io/ggml-org/llama.cpp:server-cuda",
+        "llama_swap_version": env_llama_swap_version or llama_swap_version or "unknown",
+        "llmfit_image": env_llmfit_image or llmfit_image or "ghcr.io/alexsjones/llmfit:latest",
+    }
+
+
+def fetch_github_json(url: str) -> Optional[Dict[str, Any]]:
+    try:
+        response = requests.get(
+            url,
+            timeout=10,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "ignite-update-check",
+            },
+        )
+        response.raise_for_status()
+        return response.json()
+    except Exception:
+        return None
+
+
+def compare_numeric_versions(current: str, latest_tag: str) -> str:
+    current_num = re.sub(r"^[^\d]*", "", str(current or ""))
+    latest_num = re.sub(r"^[^\d]*", "", str(latest_tag or ""))
+    if not current_num or not latest_num:
+        return "unknown"
+    try:
+        current_val = int(current_num)
+        latest_val = int(latest_num)
+        if current_val == latest_val:
+            return "up_to_date"
+        if current_val < latest_val:
+            return "update_available"
+        return "ahead_or_custom"
+    except Exception:
+        return "unknown"
+
+
+def get_updates_payload(refresh: bool = False) -> Dict[str, Any]:
+    checked_at = updates_cache.get("checked_at")
+    if (
+        not refresh
+        and isinstance(checked_at, datetime)
+        and datetime.now() - checked_at < timedelta(minutes=15)
+        and isinstance(updates_cache.get("result"), dict)
+    ):
+        return updates_cache["result"]
+
+    refs = parse_current_runtime_refs()
+    llama_swap_release = fetch_github_json("https://api.github.com/repos/mostlygeek/llama-swap/releases/latest")
+    llama_cpp_repo = fetch_github_json("https://api.github.com/repos/ggml-org/llama.cpp")
+    llmfit_repo = fetch_github_json("https://api.github.com/repos/alexsjones/llmfit")
+
+    components = [
+        {
+            "id": "ignite",
+            "name": "Ignite",
+            "current": refs["ignite_version"],
+            "latest": None,
+            "status": "local_app",
+            "summary": "Ignite is your app layer. Update it by pulling the repo and rebuilding the stack.",
+            "changelog_url": "https://github.com/Spadav/Ignite/commits/main",
+            "release_url": "https://github.com/Spadav/Ignite",
+            "update_script": "./scripts/update.sh",
+            "manual_update": [
+                "git pull --ff-only",
+                "docker compose build --pull ignite llama-runtime",
+                "docker compose pull llmfit",
+                "docker compose up -d",
+            ],
+        },
+        {
+            "id": "llama-swap",
+            "name": "llama-swap",
+            "current": f"v{refs['llama_swap_version']}" if refs["llama_swap_version"] != "unknown" else "unknown",
+            "latest": llama_swap_release.get("tag_name") if llama_swap_release else None,
+            "status": compare_numeric_versions(refs["llama_swap_version"], llama_swap_release.get("tag_name", "")) if llama_swap_release else "unknown",
+            "summary": "Pinned release inside the runtime image. This can be compared directly to the latest upstream release.",
+            "changelog_url": (llama_swap_release or {}).get("html_url") or "https://github.com/mostlygeek/llama-swap/releases",
+            "release_url": "https://github.com/mostlygeek/llama-swap/releases",
+            "update_script": "./scripts/update.sh",
+            "manual_update": [
+                "Edit docker/llama-runtime/Dockerfile",
+                "Bump LLAMA_SWAP_VERSION",
+                "docker compose build --pull llama-runtime ignite",
+                "docker compose up -d",
+            ],
+        },
+        {
+            "id": "llama.cpp",
+            "name": "llama.cpp runtime image",
+            "current": refs["llama_cpp_image"],
+            "latest": (llama_cpp_repo or {}).get("pushed_at"),
+            "status": "floating_image",
+            "summary": "This uses a floating Docker image reference. Rebuilds and pulls track upstream, but exact freshness cannot be compared from the tag alone.",
+            "changelog_url": "https://github.com/ggml-org/llama.cpp/commits/master",
+            "release_url": "https://github.com/ggml-org/llama.cpp",
+            "update_script": "./scripts/update.sh",
+            "manual_update": [
+                "docker compose build --pull llama-runtime ignite",
+                "docker compose up -d",
+            ],
+        },
+        {
+            "id": "llmfit",
+            "name": "llmfit",
+            "current": refs["llmfit_image"],
+            "latest": (llmfit_repo or {}).get("pushed_at"),
+            "status": "floating_image",
+            "summary": "This uses the floating `latest` image tag. Pull again to refresh to the newest published image.",
+            "changelog_url": "https://github.com/alexsjones/llmfit/commits/main",
+            "release_url": "https://github.com/alexsjones/llmfit",
+            "update_script": "./scripts/update.sh",
+            "manual_update": [
+                "docker compose pull llmfit",
+                "docker compose up -d llmfit",
+            ],
+        },
+    ]
+
+    payload = {
+        "checked_at": datetime.now().isoformat(),
+        "components": components,
+    }
+    updates_cache.update({"checked_at": datetime.now(), "result": payload})
+    return payload
 
 
 def get_gpu_stats() -> Dict[str, Any]:
@@ -1331,6 +1549,12 @@ def api_discover_recommendations(
     return get_llmfit_recommendations(use_case=use_case, limit=limit)
 
 
+@app.get("/api/updates")
+def api_get_updates(refresh: bool = Query(False)):
+    """Get current versions, update signals, and changelog links for Ignite runtime components."""
+    return get_updates_payload(refresh=refresh)
+
+
 @app.get("/api/status")
 def api_status():
     """Get llama-swap status and GPU stats"""
@@ -1549,13 +1773,21 @@ async def websocket_download(websocket: WebSocket, task_id: str):
 @app.get("/api/settings")
 def api_get_settings():
     """Get current settings"""
+    docker_restart_policy = get_docker_restart_policy_name() if is_docker_managed_runtime() else None
+    restart_on_boot = (
+        docker_restart_policy == "unless-stopped"
+        if docker_restart_policy is not None
+        else bool(settings.get("restart_on_boot"))
+    )
     return {
         **settings,
+        "restart_on_boot": restart_on_boot,
         "_meta": {
             "runtime_mode": get_runtime_mode(),
             "managed_runtime": is_docker_managed_runtime(),
             "config_exists": Path(os.path.expanduser(settings["llama_swap_config"])).exists(),
             "docker_control_warning": get_docker_control_warning(),
+            "docker_restart_policy": docker_restart_policy,
             "docker_paths": {
                 "models_dir": os.environ.get("SWAPDECK_MODELS_DIR", "./models"),
                 "config_dir": os.environ.get("SWAPDECK_CONFIG_DIR", "./config"),
@@ -1572,6 +1804,8 @@ def api_save_settings(new_settings: Dict[str, Any]):
     for key in DEFAULT_SETTINGS:
         if key in new_settings:
             settings[key] = new_settings[key]
+    if is_docker_managed_runtime() and "restart_on_boot" in new_settings:
+        apply_docker_restart_policy(bool(new_settings["restart_on_boot"]))
     save_settings(settings)
     return api_get_settings()
 

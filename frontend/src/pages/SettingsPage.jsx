@@ -110,6 +110,27 @@ function SettingsPage() {
             onChange={(e) => handleChange('advanced_gpu_mode', e.target.checked)}
           />
         </label>
+
+        {meta?.managed_runtime && (
+          <label className="mt-4 flex items-start justify-between gap-4 rounded-lg border p-4" style={{ borderColor: 'var(--line-soft)' }}>
+            <div>
+              <div className="font-medium">Start Ignite Automatically After Reboot</div>
+              <p className="text-sm mt-1" style={{ color: 'var(--text-muted)' }}>
+                Applies Docker restart policy to the Ignite containers. When enabled, Docker will bring Ignite back automatically unless you explicitly stop it.
+              </p>
+              {meta?.docker_restart_policy && (
+                <p className="text-xs mt-2" style={{ color: 'var(--text-muted)' }}>
+                  Current Docker restart policy: {meta.docker_restart_policy}
+                </p>
+              )}
+            </div>
+            <input
+              type="checkbox"
+              checked={Boolean(settings.restart_on_boot)}
+              onChange={(e) => handleChange('restart_on_boot', e.target.checked)}
+            />
+          </label>
+        )}
       </div>
 
       {meta?.managed_runtime && (

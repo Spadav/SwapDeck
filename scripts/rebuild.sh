@@ -9,10 +9,10 @@ ensure_docker
 print_step "2/3" "Preparing config and models folders"
 ensure_layout
 
-print_step "3/3" "Starting Ignite"
+print_step "3/3" "Rebuilding and recreating Ignite"
 (
   cd "$ROOT_DIR"
-  docker_compose up -d
+  docker_compose up -d --build
 )
 
 printf 'llama-swap API: http://127.0.0.1:%s/v1\n' "$LLAMA_SWAP_PORT"

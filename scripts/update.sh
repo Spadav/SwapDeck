@@ -21,3 +21,4 @@ print_step "4/4" "Refreshing runtime images and restarting Ignite"
 )
 
 printf '\nIgnite updated.\n'
+printf 'If you only need to resume stopped containers later, use: ./scripts/start.sh\n'

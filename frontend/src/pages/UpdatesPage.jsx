@@ -1,0 +1,146 @@
+import React, { useEffect, useState } from 'react'
+
+function statusTone(status) {
+  switch (status) {
+    case 'up_to_date':
+      return { bg: 'rgba(34, 197, 94, 0.14)', border: 'rgba(34, 197, 94, 0.35)', text: '#bbf7d0', label: 'Up to Date' }
+    case 'update_available':
+      return { bg: 'rgba(245, 158, 11, 0.14)', border: 'rgba(245, 158, 11, 0.35)', text: '#fde68a', label: 'Update Available' }
+    case 'ahead_or_custom':
+      return { bg: 'rgba(59, 130, 246, 0.14)', border: 'rgba(59, 130, 246, 0.35)', text: '#bfdbfe', label: 'Ahead / Custom' }
+    case 'floating_image':
+      return { bg: 'rgba(148, 163, 184, 0.14)', border: 'rgba(148, 163, 184, 0.35)', text: '#cbd5e1', label: 'Tracks Latest On Pull' }
+    case 'local_app':
+      return { bg: 'rgba(168, 85, 247, 0.14)', border: 'rgba(168, 85, 247, 0.35)', text: '#e9d5ff', label: 'App Layer' }
+    default:
+      return { bg: 'rgba(148, 163, 184, 0.14)', border: 'rgba(148, 163, 184, 0.35)', text: '#cbd5e1', label: 'Unknown' }
+  }
+}
+
+function UpdatesPage() {
+  const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [checking, setChecking] = useState(false)
+  const [error, setError] = useState('')
+
+  const loadUpdates = async (refresh = false) => {
+    try {
+      if (refresh) setChecking(true)
+      else setLoading(true)
+      setError('')
+
+      const response = await fetch(`/api/updates${refresh ? '?refresh=true' : ''}`)
+      const payload = await response.json().catch(() => ({}))
+      if (!response.ok) throw new Error(payload.detail || 'Failed to load update data')
+      setData(payload)
+    } catch (err) {
+      setError(err.message || 'Failed to load update data')
+    } finally {
+      setLoading(false)
+      setChecking(false)
+    }
+  }
+
+  useEffect(() => {
+    loadUpdates(false)
+  }, [])
+
+  if (loading) return <p className="p-6">Loading...</p>
+
+  return (
+    <div className="p-6">
+      <div className="flex items-center justify-between gap-4 mb-6">
+        <div>
+          <h2 className="text-2xl font-semibold tracking-tight">Updates</h2>
+          <p className="text-sm mt-1" style={{ color: 'var(--text-muted)' }}>
+            Check what Ignite is using, what can be compared directly, and where to read upstream changelogs.
+          </p>
+        </div>
+        <button onClick={() => loadUpdates(true)} disabled={checking} className="btn btn-primary">
+          {checking ? 'Checking...' : 'Check For Updates'}
+        </button>
+      </div>
+
+      {error && (
+        <div className="mb-4 px-4 py-2 rounded-lg text-sm border bg-red-100 text-red-800" style={{ borderColor: 'var(--line-soft)' }}>
+          {error}
+        </div>
+      )}
+
+      <div className="card mb-6">
+        <h3 className="text-lg font-semibold mb-2">How Updates Work</h3>
+        <div className="space-y-2 text-sm" style={{ color: 'var(--text-muted)' }}>
+          <div>- Pinned versions like `llama-swap` can be compared directly against upstream releases.</div>
+          <div>- Floating Docker tags like `llama.cpp:server-cuda` or `llmfit:latest` follow upstream on pull/rebuild, so exact freshness cannot be proven from the tag alone.</div>
+          <div>- Use `Check For Updates` to refresh upstream release metadata and changelog links.</div>
+        </div>
+        {data?.checked_at && (
+          <p className="text-xs mt-3" style={{ color: 'var(--text-muted)' }}>
+            Last checked: {new Date(data.checked_at).toLocaleString()}
+          </p>
+        )}
+      </div>
+
+      <div className="space-y-4">
+        {(data?.components || []).map((component) => {
+          const tone = statusTone(component.status)
+          return (
+            <div key={component.id} className="card">
+              <div className="flex items-start justify-between gap-4 mb-4">
+                <div>
+                  <h3 className="text-lg font-semibold">{component.name}</h3>
+                  <p className="text-sm mt-1" style={{ color: 'var(--text-muted)' }}>
+                    {component.summary}
+                  </p>
+                </div>
+                <div
+                  className="px-3 py-1 rounded-full text-xs font-semibold border"
+                  style={{ background: tone.bg, borderColor: tone.border, color: tone.text }}
+                >
+                  {tone.label}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+                <div className="rounded-lg border p-3" style={{ borderColor: 'var(--line-soft)', background: 'rgba(148, 163, 184, 0.08)' }}>
+                  <div className="text-sm font-medium">Current</div>
+                  <div className="font-mono text-sm mt-1 break-all">{component.current || 'Unknown'}</div>
+                </div>
+                <div className="rounded-lg border p-3" style={{ borderColor: 'var(--line-soft)', background: 'rgba(148, 163, 184, 0.08)' }}>
+                  <div className="text-sm font-medium">Latest Upstream Signal</div>
+                  <div className="font-mono text-sm mt-1 break-all">{component.latest || 'Not available'}</div>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap gap-2 mb-4">
+                <a href={component.changelog_url} target="_blank" rel="noreferrer" className="btn btn-secondary text-sm">
+                  Open Changelog
+                </a>
+                <a href={component.release_url} target="_blank" rel="noreferrer" className="btn btn-secondary text-sm">
+                  Open Upstream
+                </a>
+              </div>
+
+              <div className="rounded-lg border p-4" style={{ borderColor: 'var(--line-soft)' }}>
+                <div className="text-sm font-semibold mb-2">Update Path</div>
+                <div className="font-mono text-sm rounded-lg border p-3 mb-3" style={{ borderColor: 'var(--line-soft)', background: 'rgba(148, 163, 184, 0.08)' }}>
+                  {component.update_script}
+                </div>
+                <div className="text-sm font-medium mb-2">Manual Commands</div>
+                <div className="space-y-2">
+                  {(component.manual_update || []).map((line, index) => (
+                    <div key={index} className="font-mono text-sm rounded-lg border p-3 break-all" style={{ borderColor: 'var(--line-soft)', background: 'rgba(148, 163, 184, 0.04)' }}>
+                      {line}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+export default UpdatesPage

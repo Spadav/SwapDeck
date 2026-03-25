@@ -29,6 +29,7 @@ function App() {
     { label: 'Models', path: '/models' },
     { label: 'Test', path: '/test' },
     { label: 'Logs', path: '/logs' },
+    { label: 'Updates', path: '/updates' },
     { label: 'Settings', path: '/settings' },
   ]
 
