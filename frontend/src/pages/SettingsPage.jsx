@@ -28,10 +28,6 @@ function SettingsPage() {
   }
 
   const handleSave = async () => {
-    if (meta?.managed_runtime) {
-      setMessage({ type: 'error', text: 'Docker mode uses container environment values for runtime paths and ports.' })
-      return
-    }
     try {
       setSaving(true)
       setMessage(null)
@@ -84,7 +80,7 @@ function SettingsPage() {
     <div className="p-6">
       <div className="flex items-center justify-between mb-6">
         <h2 className="text-2xl font-semibold tracking-tight">Settings</h2>
-        <button onClick={handleSave} disabled={saving || meta?.managed_runtime} className="btn btn-primary">
+        <button onClick={handleSave} disabled={saving} className="btn btn-primary">
           {saving ? 'Saving...' : 'Save Settings'}
         </button>
       </div>
@@ -94,10 +90,27 @@ function SettingsPage() {
           <h3 className="text-lg font-semibold mb-2">Docker Mode</h3>
           <p className="text-sm" style={{ color: 'var(--text-muted)' }}>
             Runtime paths and ports come from Docker Compose and container environment values in this mode.
-            Edit the repo config and compose files instead of changing these fields here.
+            Those fields stay read-only here, but UI-only settings can still be saved below.
           </p>
         </div>
       )}
+
+      <div className="card mb-6">
+        <h3 className="text-lg font-semibold mb-3">Advanced UI</h3>
+        <label className="flex items-start justify-between gap-4 rounded-lg border p-4" style={{ borderColor: 'var(--line-soft)' }}>
+          <div>
+            <div className="font-medium">Advanced GPU Mode</div>
+            <p className="text-sm mt-1" style={{ color: 'var(--text-muted)' }}>
+              Show per-model GPU assignment controls in Config. This is for machines with multiple GPUs or manual llama.cpp GPU pinning needs.
+            </p>
+          </div>
+          <input
+            type="checkbox"
+            checked={Boolean(settings.advanced_gpu_mode)}
+            onChange={(e) => handleChange('advanced_gpu_mode', e.target.checked)}
+          />
+        </label>
+      </div>
 
       {meta?.managed_runtime && (
         <div className="card mb-6">

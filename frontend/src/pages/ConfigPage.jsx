@@ -59,6 +59,8 @@ const CONFIG_GUIDE_SECTIONS = [
 function ConfigPage() {
   const [config, setConfig] = useState(null)
   const [rawConfig, setRawConfig] = useState('')
+  const [advancedGpuMode, setAdvancedGpuMode] = useState(false)
+  const [gpuOptions, setGpuOptions] = useState([])
   const [guideOpen, setGuideOpen] = useState(false)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -68,8 +70,10 @@ function ConfigPage() {
   const [message, setMessage] = useState(null)
   const [editorMode, setEditorMode] = useState('structured')
   const [folderModal, setFolderModal] = useState(null)
+  const [groupHelpOpen, setGroupHelpOpen] = useState(false)
   const [folderNameDraft, setFolderNameDraft] = useState('')
   const [folderSelectionDraft, setFolderSelectionDraft] = useState({})
+  const [envDrafts, setEnvDrafts] = useState({})
 
   useEffect(() => {
     fetchConfig()
@@ -77,18 +81,29 @@ function ConfigPage() {
 
   const fetchConfig = async () => {
     try {
-      const [configResponse, rawResponse] = await Promise.all([
+      const [configResponse, rawResponse, settingsResponse, statusResponse] = await Promise.all([
         fetch('/api/config'),
-        fetch('/api/config/raw')
+        fetch('/api/config/raw'),
+        fetch('/api/settings'),
+        fetch('/api/status')
       ])
 
-      if (!configResponse.ok || !rawResponse.ok) throw new Error('API error')
+      if (!configResponse.ok || !rawResponse.ok || !settingsResponse.ok || !statusResponse.ok) throw new Error('API error')
 
       const configData = await configResponse.json()
       const rawData = await rawResponse.json()
+      const settingsData = await settingsResponse.json()
+      const statusData = await statusResponse.json()
+      const nextEnvDrafts = {}
+      for (const [modelKey, model] of Object.entries(configData.models || {})) {
+        nextEnvDrafts[modelKey] = serializeEnv(model.env)
+      }
 
       setConfig(configData)
       setRawConfig(rawData.content || '')
+      setAdvancedGpuMode(Boolean(settingsData.advanced_gpu_mode))
+      setGpuOptions(Array.isArray(statusData?.gpu?.gpus) ? statusData.gpu.gpus : [])
+      setEnvDrafts(nextEnvDrafts)
       setMessage(null)
     } catch (error) {
       setConfig(null)
@@ -171,6 +186,115 @@ function ConfigPage() {
     }))
   }
 
+  const serializeEnv = (envObject) => {
+    if (!envObject) return ''
+    if (Array.isArray(envObject)) {
+      return envObject.join('\n')
+    }
+    if (typeof envObject === 'object') {
+      return Object.entries(envObject)
+        .map(([key, value]) => `${key}=${value ?? ''}`)
+        .join('\n')
+    }
+    return ''
+  }
+
+  const parseEnvText = (text) => {
+    const env = []
+    for (const rawLine of text.split('\n')) {
+      const line = rawLine.trim()
+      if (!line) continue
+      env.push(line)
+    }
+    return env
+  }
+
+  const handleEnvChange = (modelKey, text) => {
+    setEnvDrafts(prev => ({ ...prev, [modelKey]: text }))
+    const nextEnv = parseEnvText(text)
+    setConfig(prev => {
+      const model = { ...prev.models[modelKey] }
+      if (nextEnv.length > 0) {
+        model.env = nextEnv
+      } else {
+        delete model.env
+      }
+      return {
+        ...prev,
+        models: {
+          ...prev.models,
+          [modelKey]: model
+        }
+      }
+    })
+  }
+
+  const upsertCmdFlag = (cmd, flag, value = null) => {
+    const escapedFlag = flag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const withValuePattern = new RegExp(`${escapedFlag}\\s+[^\\s]+`, 'g')
+    const barePattern = new RegExp(`${escapedFlag}(?=\\s|$)`, 'g')
+    let next = String(cmd || '')
+
+    next = next.replace(withValuePattern, '').replace(barePattern, '')
+    next = next.replace(/\s+/g, ' ').trim()
+
+    if (value === null || value === undefined || value === '') {
+      return next
+    }
+
+    return `${next} ${flag} ${value}`.trim()
+  }
+
+  const getGpuAssignment = (model) => {
+    const envList = Array.isArray(model?.env) ? model.env : []
+    const cudaLine = envList.find((entry) => String(entry).startsWith('CUDA_VISIBLE_DEVICES='))
+    if (!cudaLine) return 'any'
+    const visible = String(cudaLine).split('=', 2)[1] ?? ''
+    if (visible === '') return 'any'
+
+    const directMatch = gpuOptions.find((gpu) => gpu.uuid === visible)
+    if (directMatch) return directMatch.uuid
+
+    const legacyIndexMatch = gpuOptions.find((gpu) => String(gpu.index) === visible)
+    if (legacyIndexMatch) return legacyIndexMatch.uuid
+
+    return 'any'
+  }
+
+  const handleGpuAssignmentChange = (modelKey, gpuValue) => {
+    let nextEnvText = ''
+    setConfig(prev => {
+      const model = { ...prev.models[modelKey] }
+      const envList = Array.isArray(model.env) ? [...model.env] : []
+      const filteredEnv = envList.filter((entry) => !String(entry).startsWith('CUDA_VISIBLE_DEVICES='))
+
+      let nextCmd = String(model.cmd || '')
+      if (gpuValue === 'any') {
+        model.env = filteredEnv.length > 0 ? filteredEnv : undefined
+        nextCmd = upsertCmdFlag(nextCmd, '--split-mode')
+        nextCmd = upsertCmdFlag(nextCmd, '--main-gpu')
+        nextEnvText = serializeEnv(model.env)
+      } else {
+        filteredEnv.push(`CUDA_VISIBLE_DEVICES=${gpuValue}`)
+        model.env = filteredEnv
+        nextCmd = upsertCmdFlag(nextCmd, '--split-mode', 'none')
+        nextCmd = upsertCmdFlag(nextCmd, '--main-gpu', '0')
+        nextEnvText = serializeEnv(model.env)
+      }
+
+      model.cmd = nextCmd
+
+      return {
+        ...prev,
+        models: {
+          ...prev.models,
+          [modelKey]: model
+        }
+      }
+    })
+    setEnvDrafts(prev => ({ ...prev, [modelKey]: nextEnvText }))
+  }
+
   const handleFilterChange = (modelKey, value) => {
     setConfig(prev => ({
       ...prev,
@@ -233,6 +357,105 @@ function ConfigPage() {
       if (a === 'Ungrouped') return 1
       if (b === 'Ungrouped') return -1
       return a.localeCompare(b)
+    })
+  }
+
+  const getRuntimeGroups = () => {
+    const groups = config?.groups && typeof config.groups === 'object' ? config.groups : {}
+    return Object.entries(groups).sort(([a], [b]) => a.localeCompare(b))
+  }
+
+  const getGroupMembers = (group) => {
+    return Array.isArray(group?.members) ? group.members.filter(Boolean) : []
+  }
+
+  const getModelAssignedGroup = (modelKey) => {
+    for (const [groupName, group] of getRuntimeGroups()) {
+      if (getGroupMembers(group).includes(modelKey)) {
+        return groupName
+      }
+    }
+    return ''
+  }
+
+  const addRuntimeGroup = () => {
+    const baseName = `group-${Date.now()}`
+    setConfig(prev => ({
+      ...prev,
+      groups: {
+        ...(prev.groups || {}),
+        [baseName]: {
+          swap: false,
+          exclusive: false,
+          persistent: false,
+          members: []
+        }
+      }
+    }))
+  }
+
+  const renameRuntimeGroup = (oldName, newNameRaw) => {
+    const newName = newNameRaw.trim()
+    if (!newName || newName === oldName) return
+    if (config.groups?.[newName]) {
+      setMessage({ type: 'error', text: `Group "${newName}" already exists` })
+      return
+    }
+
+    setConfig(prev => {
+      const nextGroups = {}
+      for (const [groupName, group] of Object.entries(prev.groups || {})) {
+        nextGroups[groupName === oldName ? newName : groupName] = group
+      }
+      return { ...prev, groups: nextGroups }
+    })
+  }
+
+  const handleRuntimeGroupChange = (groupName, field, value) => {
+    setConfig(prev => ({
+      ...prev,
+      groups: {
+        ...(prev.groups || {}),
+        [groupName]: {
+          ...((prev.groups || {})[groupName] || {}),
+          [field]: value
+        }
+      }
+    }))
+  }
+
+  const deleteRuntimeGroup = (groupName) => {
+    setConfig(prev => {
+      const nextGroups = { ...(prev.groups || {}) }
+      delete nextGroups[groupName]
+      return {
+        ...prev,
+        ...(Object.keys(nextGroups).length > 0 ? { groups: nextGroups } : { groups: undefined })
+      }
+    })
+  }
+
+  const handleModelGroupAssignment = (modelKey, groupName) => {
+    setConfig(prev => {
+      const nextGroups = {}
+      for (const [name, group] of Object.entries(prev.groups || {})) {
+        nextGroups[name] = {
+          ...group,
+          members: getGroupMembers(group).filter((member) => member !== modelKey)
+        }
+      }
+
+      if (groupName && nextGroups[groupName]) {
+        nextGroups[groupName] = {
+          ...nextGroups[groupName],
+          members: [...getGroupMembers(nextGroups[groupName]), modelKey]
+        }
+      }
+
+      return {
+        ...prev,
+        ...(Object.keys(nextGroups).length > 0 ? { groups: nextGroups } : { groups: undefined })
+      }
     })
   }
 
@@ -330,7 +553,18 @@ function ConfigPage() {
     try {
       const models = { ...config.models }
       delete models[modelKey]
-      const nextConfig = { ...config, models }
+      const nextGroups = {}
+      for (const [groupName, group] of Object.entries(config.groups || {})) {
+        nextGroups[groupName] = {
+          ...group,
+          members: getGroupMembers(group).filter((member) => member !== modelKey)
+        }
+      }
+      const nextConfig = {
+        ...config,
+        models,
+        ...(Object.keys(nextGroups).length > 0 ? { groups: nextGroups } : { groups: undefined })
+      }
       if (nextConfig.healthCheck?.model === modelKey) {
         nextConfig.healthCheck = { ...nextConfig.healthCheck, model: '' }
       }
@@ -356,6 +590,7 @@ function ConfigPage() {
         }
       }
     }))
+    setEnvDrafts(prev => ({ ...prev, [key]: '' }))
     setExpandedModels(prev => ({ ...prev, [key]: true }))
   }
 
@@ -371,7 +606,18 @@ function ConfigPage() {
       for (const [k, v] of entries) {
         newModels[k === oldKey ? newKey : k] = v
       }
-      const newConfig = { ...prev, models: newModels }
+      const nextGroups = {}
+      for (const [groupName, group] of Object.entries(prev.groups || {})) {
+        nextGroups[groupName] = {
+          ...group,
+          members: getGroupMembers(group).map((member) => member === oldKey ? newKey : member)
+        }
+      }
+      const newConfig = {
+        ...prev,
+        models: newModels,
+        ...(Object.keys(nextGroups).length > 0 ? { groups: nextGroups } : { groups: undefined })
+      }
       if (prev.healthCheck?.model === oldKey) {
         newConfig.healthCheck = { ...prev.healthCheck, model: newKey }
       }
@@ -380,6 +626,12 @@ function ConfigPage() {
     setExpandedModels(prev => {
       const next = { ...prev }
       next[newKey] = next[oldKey]
+      delete next[oldKey]
+      return next
+    })
+    setEnvDrafts(prev => {
+      const next = { ...prev }
+      next[newKey] = next[oldKey] ?? ''
       delete next[oldKey]
       return next
     })
@@ -397,7 +649,7 @@ function ConfigPage() {
         <div>
           <h2 className="text-2xl font-semibold tracking-tight">Configuration</h2>
           <p className="text-sm mt-1" style={{ color: 'var(--text-muted)' }}>
-            Structured mode covers common fields. Raw YAML mode supports the full llama-swap schema.
+            Structured mode covers the fields most people actually change. Raw YAML stays available for advanced schema editing only.
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -579,14 +831,84 @@ function ConfigPage() {
         </div>
       )}
 
+      {groupHelpOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          style={{ background: 'rgba(8, 10, 14, 0.7)' }}
+          onClick={() => setGroupHelpOpen(false)}
+        >
+          <div
+            className="card w-full max-w-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-4 mb-4">
+              <div>
+                <h3 className="text-xl font-semibold">Runtime Groups Help</h3>
+                <p className="text-sm mt-1" style={{ color: 'var(--text-muted)' }}>
+                  Groups control how llama-swap keeps models loaded or unloads them.
+                </p>
+              </div>
+              <button
+                onClick={() => setGroupHelpOpen(false)}
+                className="px-3 py-2 rounded-lg text-sm"
+                style={{ background: 'var(--line-soft)' }}
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="space-y-4 text-sm">
+              <div className="rounded-lg border p-4" style={{ borderColor: 'var(--line-soft)' }}>
+                <div className="font-semibold mb-1">swap</div>
+                <div style={{ color: 'var(--text-muted)' }}>
+                  If enabled, this group behaves like one-at-a-time swapping. Starting one model in the group unloads another model in the same group.
+                </div>
+              </div>
+
+              <div className="rounded-lg border p-4" style={{ borderColor: 'var(--line-soft)' }}>
+                <div className="font-semibold mb-1">exclusive</div>
+                <div style={{ color: 'var(--text-muted)' }}>
+                  If enabled, starting a model in this group can unload models from other groups. This is not related to GPU assignment.
+                </div>
+              </div>
+
+              <div className="rounded-lg border p-4" style={{ borderColor: 'var(--line-soft)' }}>
+                <div className="font-semibold mb-1">persistent</div>
+                <div style={{ color: 'var(--text-muted)' }}>
+                  If enabled, other groups should not unload this group. Use this when you want a group to stay loaded if hardware allows it.
+                </div>
+              </div>
+
+              <div className="rounded-lg border p-4" style={{ borderColor: 'var(--line-soft)', background: 'rgba(148, 163, 184, 0.08)' }}>
+                <div className="font-semibold mb-1">Example: keep two models loaded</div>
+                <div style={{ color: 'var(--text-muted)' }}>
+                  Put each model in its own group and start with:
+                  <br />
+                  `swap: false`
+                  <br />
+                  `exclusive: false`
+                  <br />
+                  `persistent: true`
+                  <br /><br />
+                  GPU assignment is a separate setting on each model.
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {editorMode === 'raw' ? (
         <div className="card">
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-lg font-semibold">Raw YAML</h3>
             <span className="text-xs" style={{ color: 'var(--text-muted)' }}>
-              Full llama-swap config support
+              Advanced editing only
             </span>
           </div>
+          <p className="text-sm mb-4" style={{ color: 'var(--text-muted)' }}>
+            Changes here bypass structured validation. Use this when you need full llama-swap schema access, not for normal day-to-day edits.
+          </p>
           <textarea
             value={rawConfig}
             onChange={(e) => setRawConfig(e.target.value)}
@@ -630,6 +952,92 @@ function ConfigPage() {
               </div>
             </div>
           </div>
+
+          {advancedGpuMode && (
+            <div className="card mt-6">
+              <div className="flex items-center justify-between mb-4 gap-4">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-lg font-semibold">Advanced Runtime Groups</h3>
+                    <button
+                      onClick={() => setGroupHelpOpen(true)}
+                      className="w-7 h-7 rounded-full border text-sm font-semibold"
+                      style={{ borderColor: 'var(--line-soft)', color: 'var(--text-muted)' }}
+                    >
+                      ?
+                    </button>
+                  </div>
+                  <p className="text-sm mt-1" style={{ color: 'var(--text-muted)' }}>
+                    Groups control llama-swap loading behavior directly. Use them when you want more than the default one-model-at-a-time swap policy.
+                  </p>
+                </div>
+                <button onClick={addRuntimeGroup} className="btn btn-secondary text-sm">
+                  + Add Group
+                </button>
+              </div>
+
+              <div className="space-y-3">
+                {getRuntimeGroups().length === 0 ? (
+                  <div className="rounded-lg border p-4 text-sm" style={{ borderColor: 'var(--line-soft)', color: 'var(--text-muted)' }}>
+                    No custom groups yet. Without groups, llama-swap uses its default runtime behavior.
+                  </div>
+                ) : (
+                  getRuntimeGroups().map(([groupName, group]) => (
+                    <div key={groupName} className="rounded-lg border p-4" style={{ borderColor: 'var(--line-soft)' }}>
+                      <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
+                        <div className="lg:col-span-2">
+                          <label className="block text-sm font-medium mb-1">Group Name</label>
+                          <input
+                            type="text"
+                            defaultValue={groupName}
+                            onBlur={(e) => renameRuntimeGroup(groupName, e.target.value)}
+                            className={inputClass}
+                          />
+                        </div>
+
+                        <label className="flex items-center gap-2 text-sm">
+                          <input
+                            type="checkbox"
+                            checked={Boolean(group.swap)}
+                            onChange={(e) => handleRuntimeGroupChange(groupName, 'swap', e.target.checked)}
+                          />
+                          Swap
+                        </label>
+
+                        <label className="flex items-center gap-2 text-sm">
+                          <input
+                            type="checkbox"
+                            checked={Boolean(group.exclusive)}
+                            onChange={(e) => handleRuntimeGroupChange(groupName, 'exclusive', e.target.checked)}
+                          />
+                          Exclusive
+                        </label>
+
+                        <label className="flex items-center gap-2 text-sm">
+                          <input
+                            type="checkbox"
+                            checked={Boolean(group.persistent)}
+                            onChange={(e) => handleRuntimeGroupChange(groupName, 'persistent', e.target.checked)}
+                          />
+                          Persistent
+                        </label>
+                      </div>
+
+                      <div className="mt-3 text-xs" style={{ color: 'var(--text-muted)' }}>
+                        Members: {getGroupMembers(group).length > 0 ? getGroupMembers(group).join(', ') : 'none'}
+                      </div>
+
+                      <div className="mt-3">
+                        <button onClick={() => deleteRuntimeGroup(groupName)} className="btn text-sm">
+                          Remove Group
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
 
           <div className="mt-6">
             <div className="flex items-center justify-between mb-4">
@@ -675,6 +1083,9 @@ function ConfigPage() {
                       {modelsInFolder.map(([key, model]) => {
                         const stripParamsValue = model.filters?.stripParams ?? model.filters?.strip_params ?? ''
                         const requestMode = model.metadata?.igniteRequestMode ?? model.metadata?.igniteTemplateMode ?? 'chat'
+                        const envText = envDrafts[key] ?? serializeEnv(model.env)
+                        const gpuAssignment = getGpuAssignment(model)
+                        const runtimeGroup = getModelAssignedGroup(key)
 
                         return (
                           <div key={key} className="rounded-lg border p-4" style={{ borderColor: 'var(--line-soft)' }}>
@@ -695,116 +1106,231 @@ function ConfigPage() {
 
                             {expandedModels[key] && (
                               <div className="mt-4 space-y-4 border-t pt-4" style={{ borderColor: 'var(--line-soft)' }}>
-                                <div>
-                                  <label className="block text-sm font-medium mb-1">Model Key</label>
-                                  <input
-                                    type="text"
-                                    defaultValue={key}
-                                    onBlur={(e) => renameModelKey(key, e.target.value.trim())}
-                                    className={inputClass}
-                                  />
-                                </div>
-
-                                <div>
-                                  <label className="block text-sm font-medium mb-1">Name</label>
-                                  <input
-                                    type="text"
-                                    value={model.name || ''}
-                                    onChange={(e) => handleModelChange(key, 'name', e.target.value)}
-                                    className={inputClass}
-                                  />
-                                </div>
-
-                                <div>
-                                  <label className="block text-sm font-medium mb-1">Command</label>
-                                  <textarea
-                                    value={model.cmd || ''}
-                                    onChange={(e) => handleModelChange(key, 'cmd', e.target.value)}
-                                    rows={8}
-                                    className={`${inputClass} font-mono text-sm`}
-                                  />
-                                </div>
-
-                                <div>
-                                  <label className="block text-sm font-medium mb-1">Proxy</label>
-                                  <input
-                                    type="text"
-                                    value={model.proxy || ''}
-                                    onChange={(e) => handleModelChange(key, 'proxy', e.target.value)}
-                                    className={`${inputClass} font-mono text-sm`}
-                                  />
-                                </div>
-
-                                <div>
-                                  <label className="block text-sm font-medium mb-1">Request Mode</label>
-                                  <select
-                                    value={requestMode}
-                                    onChange={(e) => handleRequestModeChange(key, e.target.value)}
-                                    className={inputClass}
-                                  >
-                                    <option value="chat">Chat</option>
-                                    <option value="completion">Completion</option>
-                                  </select>
-                                  <p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
-                                    Use Chat for instruct/conversation models. Use Completion for code or continuation models like StarCoder.
-                                  </p>
-                                </div>
-
-                                {model.filters ? (
+                                <div className="rounded-lg border p-4 space-y-4" style={{ borderColor: 'var(--line-soft)' }}>
+                                  <div className="text-sm font-semibold">General</div>
                                   <div>
-                                    <div className="flex items-center justify-between mb-1">
-                                      <label className="block text-sm font-medium">Filters (stripParams)</label>
-                                      <button
-                                        onClick={() => removeFilters(key)}
-                                        className="text-xs text-red-500 hover:text-red-700"
-                                      >
-                                        Remove filters
-                                      </button>
-                                    </div>
+                                    <label className="block text-sm font-medium mb-1">Model Key</label>
                                     <input
                                       type="text"
-                                      value={stripParamsValue}
-                                      onChange={(e) => handleFilterChange(key, e.target.value)}
-                                      placeholder="temperature, top_k, top_p"
-                                      className={`${inputClass} text-sm`}
+                                      defaultValue={key}
+                                      onBlur={(e) => renameModelKey(key, e.target.value.trim())}
+                                      className={inputClass}
                                     />
                                   </div>
-                                ) : (
-                                  <button
-                                    onClick={() => handleFilterChange(key, '')}
-                                    className="text-sm text-blue-500 hover:text-blue-700"
-                                  >
-                                    + Add filters
-                                  </button>
-                                )}
 
-                                {model.aliases ? (
                                   <div>
-                                    <div className="flex items-center justify-between mb-1">
-                                      <label className="block text-sm font-medium">Aliases (comma-separated)</label>
-                                      <button
-                                        onClick={() => removeAliases(key)}
-                                        className="text-xs text-red-500 hover:text-red-700"
-                                      >
-                                        Remove aliases
-                                      </button>
-                                    </div>
+                                    <label className="block text-sm font-medium mb-1">Name</label>
                                     <input
                                       type="text"
-                                      value={(model.aliases || []).join(', ')}
-                                      onChange={(e) => handleAliasesChange(key, e.target.value)}
-                                      placeholder="alias-1, alias-2"
-                                      className={`${inputClass} text-sm`}
+                                      value={model.name || ''}
+                                      onChange={(e) => handleModelChange(key, 'name', e.target.value)}
+                                      className={inputClass}
                                     />
                                   </div>
-                                ) : (
-                                  <button
-                                    onClick={() => handleModelChange(key, 'aliases', [''])}
-                                    className="text-sm text-blue-500 hover:text-blue-700"
-                                  >
-                                    + Add aliases
-                                  </button>
-                                )}
+
+                                  <div>
+                                    <label className="block text-sm font-medium mb-1">Description</label>
+                                    <input
+                                      type="text"
+                                      value={model.description || ''}
+                                      onChange={(e) => handleModelChange(key, 'description', e.target.value)}
+                                      placeholder="Short note about what this config is for"
+                                      className={inputClass}
+                                    />
+                                  </div>
+                                </div>
+
+                                <div className="rounded-lg border p-4 space-y-4" style={{ borderColor: 'var(--line-soft)' }}>
+                                  <div className="text-sm font-semibold">Runtime</div>
+                                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    <div>
+                                      <label className="block text-sm font-medium mb-1">Proxy</label>
+                                      <input
+                                        type="text"
+                                        value={model.proxy || ''}
+                                        onChange={(e) => handleModelChange(key, 'proxy', e.target.value)}
+                                        className={`${inputClass} font-mono text-sm`}
+                                      />
+                                    </div>
+
+                                    <div>
+                                      <label className="block text-sm font-medium mb-1">TTL (seconds)</label>
+                                      <input
+                                        type="number"
+                                        value={model.ttl ?? ''}
+                                        onChange={(e) => handleModelChange(key, 'ttl', e.target.value === '' ? undefined : parseInt(e.target.value, 10) || 0)}
+                                        placeholder="Use global TTL"
+                                        className={inputClass}
+                                      />
+                                    </div>
+
+                                    <div>
+                                      <label className="block text-sm font-medium mb-1">Check Endpoint</label>
+                                      <input
+                                        type="text"
+                                        value={model.checkEndpoint || ''}
+                                        onChange={(e) => handleModelChange(key, 'checkEndpoint', e.target.value || undefined)}
+                                        placeholder="/health"
+                                        className={inputClass}
+                                      />
+                                    </div>
+
+                                    <div>
+                                      <label className="block text-sm font-medium mb-1">Use Model Name</label>
+                                      <input
+                                        type="text"
+                                        value={model.useModelName || ''}
+                                        onChange={(e) => handleModelChange(key, 'useModelName', e.target.value || undefined)}
+                                        placeholder="Override upstream model name"
+                                        className={inputClass}
+                                      />
+                                    </div>
+                                  </div>
+
+                                  {advancedGpuMode && (
+                                    <>
+                                      <div>
+                                        <label className="block text-sm font-medium mb-1">GPU Assignment</label>
+                                        <select
+                                          value={gpuAssignment}
+                                          onChange={(e) => handleGpuAssignmentChange(key, e.target.value)}
+                                          className={inputClass}
+                                        >
+                                          <option value="any">Any Visible GPU</option>
+                                          {gpuOptions.map((gpu) => (
+                                            <option key={gpu.uuid || gpu.index} value={gpu.uuid || String(gpu.index)}>
+                                              GPU {gpu.index}: {gpu.name}
+                                            </option>
+                                          ))}
+                                        </select>
+                                        <p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
+                                          Advanced GPU Mode pins this model with the selected GPU UUID plus `--split-mode none` and `--main-gpu 0`.
+                                        </p>
+                                      </div>
+
+                                      <div>
+                                        <label className="block text-sm font-medium mb-1">Runtime Group</label>
+                                        <select
+                                          value={runtimeGroup}
+                                          onChange={(e) => handleModelGroupAssignment(key, e.target.value)}
+                                          className={inputClass}
+                                        >
+                                          <option value="">Default Runtime Behavior</option>
+                                          {getRuntimeGroups().map(([groupName]) => (
+                                            <option key={groupName} value={groupName}>{groupName}</option>
+                                          ))}
+                                        </select>
+                                        <p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
+                                          Assign this model to a llama-swap group when you want custom swapping or multiple loaded models.
+                                        </p>
+                                      </div>
+                                    </>
+                                  )}
+
+                                  <div>
+                                    <label className="block text-sm font-medium mb-1">Request Mode</label>
+                                    <select
+                                      value={requestMode}
+                                      onChange={(e) => handleRequestModeChange(key, e.target.value)}
+                                      className={inputClass}
+                                    >
+                                      <option value="chat">Chat</option>
+                                      <option value="completion">Completion</option>
+                                    </select>
+                                    <p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
+                                      Use Chat for instruct/conversation models. Use Completion for code or continuation models like StarCoder.
+                                    </p>
+                                  </div>
+                                </div>
+
+                                <div className="rounded-lg border p-4 space-y-4" style={{ borderColor: 'var(--line-soft)' }}>
+                                  <div className="text-sm font-semibold">Command</div>
+                                  <div>
+                                    <label className="block text-sm font-medium mb-1">Command</label>
+                                    <textarea
+                                      value={model.cmd || ''}
+                                      onChange={(e) => handleModelChange(key, 'cmd', e.target.value)}
+                                      rows={8}
+                                      className={`${inputClass} font-mono text-sm`}
+                                    />
+                                  </div>
+                                </div>
+
+                                <div className="rounded-lg border p-4 space-y-4" style={{ borderColor: 'var(--line-soft)' }}>
+                                  <div className="text-sm font-semibold">Env</div>
+                                  <div>
+                                    <label className="block text-sm font-medium mb-1">Environment Variables</label>
+                                    <textarea
+                                      value={envText}
+                                      onChange={(e) => handleEnvChange(key, e.target.value)}
+                                      rows={5}
+                                      placeholder={'CUDA_VISIBLE_DEVICES=1\nHF_TOKEN=...'}
+                                      className={`${inputClass} font-mono text-sm`}
+                                    />
+                                    <p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
+                                      One `KEY=value` per line. Leave empty to remove model-specific environment overrides.
+                                    </p>
+                                  </div>
+                                </div>
+
+                                <div className="rounded-lg border p-4 space-y-4" style={{ borderColor: 'var(--line-soft)' }}>
+                                  <div className="text-sm font-semibold">Aliases And Filters</div>
+                                  {model.aliases ? (
+                                    <div>
+                                      <div className="flex items-center justify-between mb-1">
+                                        <label className="block text-sm font-medium">Aliases (comma-separated)</label>
+                                        <button
+                                          onClick={() => removeAliases(key)}
+                                          className="text-xs text-red-500 hover:text-red-700"
+                                        >
+                                          Remove aliases
+                                        </button>
+                                      </div>
+                                      <input
+                                        type="text"
+                                        value={(model.aliases || []).join(', ')}
+                                        onChange={(e) => handleAliasesChange(key, e.target.value)}
+                                        placeholder="alias-1, alias-2"
+                                        className={`${inputClass} text-sm`}
+                                      />
+                                    </div>
+                                  ) : (
+                                    <button
+                                      onClick={() => handleModelChange(key, 'aliases', [''])}
+                                      className="text-sm text-blue-500 hover:text-blue-700"
+                                    >
+                                      + Add aliases
+                                    </button>
+                                  )}
+
+                                  {model.filters ? (
+                                    <div>
+                                      <div className="flex items-center justify-between mb-1">
+                                        <label className="block text-sm font-medium">Filters (stripParams)</label>
+                                        <button
+                                          onClick={() => removeFilters(key)}
+                                          className="text-xs text-red-500 hover:text-red-700"
+                                        >
+                                          Remove filters
+                                        </button>
+                                      </div>
+                                      <input
+                                        type="text"
+                                        value={stripParamsValue}
+                                        onChange={(e) => handleFilterChange(key, e.target.value)}
+                                        placeholder="temperature, top_k, top_p"
+                                        className={`${inputClass} text-sm`}
+                                      />
+                                    </div>
+                                  ) : (
+                                    <button
+                                      onClick={() => handleFilterChange(key, '')}
+                                      className="text-sm text-blue-500 hover:text-blue-700"
+                                    >
+                                      + Add filters
+                                    </button>
+                                  )}
+                                </div>
 
                                 <div className="pt-2 border-t" style={{ borderColor: 'var(--line-soft)' }}>
                                   {deleteConfirm === key ? (

@@ -8,9 +8,10 @@ function App() {
   const appName = 'Ignite'
   const navigate = useNavigate()
   const location = useLocation()
-  const [darkMode, setDarkMode] = useState(false)
+  const [darkMode, setDarkMode] = useState(true)
   const gpuStats = useGpuStats()
   const { running, pid } = useServiceStatus()
+  const formatGiB = (value) => Number(value || 0).toFixed(1).replace(/\.0$/, '')
 
   useEffect(() => {
     if (darkMode) {
@@ -53,7 +54,7 @@ function App() {
             <div className="shell-chip">
               <span className="text-xs uppercase tracking-[0.16em]" style={{ color: 'var(--text-muted)' }}>GPU</span>
               <span className="text-sm font-mono">
-                {gpuStats.memoryUsedGb}/{gpuStats.memoryTotalGb}GiB {gpuStats.temperatureC}°C
+                {formatGiB(gpuStats.memoryUsedGb)}/{formatGiB(gpuStats.memoryTotalGb)}GiB {gpuStats.temperatureC}°C
               </span>
             </div>
             <div className="shell-chip">

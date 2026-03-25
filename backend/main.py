@@ -42,7 +42,13 @@ import uvicorn
 LLAMA_SWAP_PROCESS_FILE = "/tmp/llama_swap.pid"
 LLAMA_SWAP_LOG_FILE = "/tmp/llama_swap.log"
 
-SETTINGS_FILE = Path(__file__).parent / "settings.json"
+LEGACY_SETTINGS_FILE = Path(__file__).parent / "settings.json"
+SETTINGS_FILE = Path(
+    os.environ.get(
+        "IGNITE_SETTINGS_FILE",
+        "/config/ignite-settings.json" if os.environ.get("SWAPDECK_DOCKER") == "1" else str(LEGACY_SETTINGS_FILE),
+    )
+)
 FRONTEND_DIST_DIR = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 CONFIG_EXAMPLE_FILE = Path(__file__).resolve().parent.parent / "config" / "config.example.yaml"
 NO_CACHE_HEADERS = {
@@ -82,6 +88,7 @@ LOCAL_DEFAULT_SETTINGS = {
     "llama_swap_config": "~/llama-swap/config.yaml",
     "llama_swap_port": 8090,
     "backend_port": 8091,
+    "advanced_gpu_mode": False,
 }
 
 DOCKER_IGNITE_PORT = int(os.environ.get("IGNITE_PORT", "3000"))
@@ -93,6 +100,7 @@ DOCKER_DEFAULT_SETTINGS = {
     "llama_swap_config": "/config/config.yaml",
     "llama_swap_port": DOCKER_LLAMA_SWAP_PORT,
     "backend_port": DOCKER_IGNITE_PORT,
+    "advanced_gpu_mode": False,
 }
 
 DEFAULT_SETTINGS = DOCKER_DEFAULT_SETTINGS if IS_DOCKER else LOCAL_DEFAULT_SETTINGS
@@ -191,9 +199,13 @@ def get_llmfit_base_url() -> Optional[str]:
 def load_settings() -> Dict[str, Any]:
     """Load settings from settings.json, falling back to defaults if missing."""
     settings = dict(DEFAULT_SETTINGS)
-    if SETTINGS_FILE.exists():
+    settings_path = SETTINGS_FILE
+    if not settings_path.exists() and IS_DOCKER and LEGACY_SETTINGS_FILE.exists():
+        settings_path = LEGACY_SETTINGS_FILE
+
+    if settings_path.exists():
         try:
-            with open(SETTINGS_FILE, "r") as f:
+            with open(settings_path, "r") as f:
                 saved = json.load(f)
             settings.update(saved)
         except Exception as e:
@@ -203,6 +215,7 @@ def load_settings() -> Dict[str, Any]:
 
 def save_settings(new_settings: Dict[str, Any]) -> None:
     """Save settings to settings.json."""
+    SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(SETTINGS_FILE, "w") as f:
         json.dump(new_settings, f, indent=2)
         f.write("\n")
@@ -271,7 +284,7 @@ def get_gpu_stats() -> Dict[str, Any]:
         result = run_command(
             [
                 "nvidia-smi",
-                "--query-gpu=index,name,memory.used,memory.total,temperature.gpu",
+                "--query-gpu=index,uuid,name,memory.used,memory.total,temperature.gpu",
                 "--format=csv,noheader,nounits",
             ]
         )
@@ -281,17 +294,18 @@ def get_gpu_stats() -> Dict[str, Any]:
         gpus = []
         for line in (result.stdout or "").splitlines():
             parts = [part.strip() for part in line.split(",")]
-            if len(parts) < 5:
+            if len(parts) < 6:
                 continue
 
             try:
                 gpus.append(
                     {
                         "index": int(parts[0]),
-                        "name": parts[1],
-                        "memory_used_gb": round(int(parts[2]) / 1024, 1),
-                        "memory_total_gb": round(int(parts[3]) / 1024, 1),
-                        "temperature_c": int(parts[4]),
+                        "uuid": parts[1],
+                        "name": parts[2],
+                        "memory_used_gb": round(int(parts[3]) / 1024, 1),
+                        "memory_total_gb": round(int(parts[4]) / 1024, 1),
+                        "temperature_c": int(parts[5]),
                     }
                 )
             except Exception:
@@ -1559,7 +1573,7 @@ def api_save_settings(new_settings: Dict[str, Any]):
         if key in new_settings:
             settings[key] = new_settings[key]
     save_settings(settings)
-    return settings
+    return api_get_settings()
 
 
 @app.get("/health")
