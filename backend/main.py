@@ -47,7 +47,9 @@ LEGACY_SETTINGS_FILE = Path(__file__).parent / "settings.json"
 SETTINGS_FILE = Path(
     os.environ.get(
         "IGNITE_SETTINGS_FILE",
-        "/config/ignite-settings.json" if os.environ.get("SWAPDECK_DOCKER") == "1" else str(LEGACY_SETTINGS_FILE),
+        "/config/ignite-settings.json"
+        if os.environ.get("IGNITE_DOCKER", os.environ.get("SWAPDECK_DOCKER", "0")) == "1"
+        else str(LEGACY_SETTINGS_FILE),
     )
 )
 FRONTEND_DIST_DIR = Path(__file__).resolve().parent.parent / "frontend" / "dist"
@@ -57,7 +59,7 @@ NO_CACHE_HEADERS = {
     "Pragma": "no-cache",
     "Expires": "0",
 }
-IS_DOCKER = os.environ.get("SWAPDECK_DOCKER") == "1"
+IS_DOCKER = os.environ.get("IGNITE_DOCKER", os.environ.get("SWAPDECK_DOCKER", "0")) == "1"
 FALLBACK_CONFIG_GUIDE = """Ignite Config Guide
 
 Core fields:
@@ -2003,8 +2005,8 @@ def api_get_settings():
             "docker_control_warning": get_docker_control_warning(),
             "docker_restart_policy": docker_restart_policy,
             "docker_paths": {
-                "models_dir": os.environ.get("SWAPDECK_MODELS_DIR", "./models"),
-                "config_dir": os.environ.get("SWAPDECK_CONFIG_DIR", "./config"),
+                "models_dir": os.environ.get("IGNITE_MODELS_DIR", os.environ.get("SWAPDECK_MODELS_DIR", "./models")),
+                "config_dir": os.environ.get("IGNITE_CONFIG_DIR", os.environ.get("SWAPDECK_CONFIG_DIR", "./config")),
             } if is_docker_managed_runtime() else None,
         },
     }

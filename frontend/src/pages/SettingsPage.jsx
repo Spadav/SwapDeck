@@ -168,8 +168,8 @@ function SettingsPage() {
             <div className="rounded-lg border p-3 text-sm" style={{ borderColor: 'var(--line-soft)' }}>
               <div className="font-medium mb-2">Example `.env`</div>
               <div className="font-mono whitespace-pre-wrap" style={{ color: 'var(--text-muted)' }}>
-{`SWAPDECK_MODELS_DIR=/home/your-user/models
-SWAPDECK_CONFIG_DIR=/home/your-user/ignite-config
+{`IGNITE_MODELS_DIR=/home/your-user/models
+IGNITE_CONFIG_DIR=/home/your-user/ignite-config
 IGNITE_PORT=3000
 LLAMA_SWAP_PORT=8090`}
               </div>

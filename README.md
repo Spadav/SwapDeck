@@ -149,14 +149,14 @@ These are the default paths for normal users.
 Advanced users can override them:
 
 ```bash
-SWAPDECK_MODELS_DIR=/path/to/models SWAPDECK_CONFIG_DIR=/path/to/config ./scripts/start.sh
+IGNITE_MODELS_DIR=/path/to/models IGNITE_CONFIG_DIR=/path/to/config ./scripts/start.sh
 ```
 
 With port overrides:
 
 ```bash
-SWAPDECK_MODELS_DIR=/path/to/models
-SWAPDECK_CONFIG_DIR=/path/to/config
+IGNITE_MODELS_DIR=/path/to/models
+IGNITE_CONFIG_DIR=/path/to/config
 IGNITE_PORT=3000
 LLAMA_SWAP_PORT=8090
 IGNITE_RESTART_POLICY=no

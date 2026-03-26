@@ -9,11 +9,11 @@ services:
     ports:
       - "${IGNITE_PORT:-3000}:3000"
     environment:
-      SWAPDECK_DOCKER: "1"
+      IGNITE_DOCKER: "1"
       LLAMA_SWAP_URL: "http://llama-runtime:8090"
       LLMFIT_URL: "http://llmfit:8787"
-      SWAPDECK_MODELS_DIR: "${SWAPDECK_MODELS_DIR:-./models}"
-      SWAPDECK_CONFIG_DIR: "${SWAPDECK_CONFIG_DIR:-./config}"
+      IGNITE_MODELS_DIR: "${IGNITE_MODELS_DIR:-${SWAPDECK_MODELS_DIR:-./models}}"
+      IGNITE_CONFIG_DIR: "${IGNITE_CONFIG_DIR:-${SWAPDECK_CONFIG_DIR:-./config}}"
       IGNITE_PORT: "${IGNITE_PORT:-3000}"
       LLAMA_SWAP_PORT: "${LLAMA_SWAP_PORT:-8090}"
       IGNITE_APP_VERSION: "1.0.0"
@@ -23,8 +23,8 @@ services:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
     volumes:
-      - ${SWAPDECK_MODELS_DIR:-./models}:/models
-      - ${SWAPDECK_CONFIG_DIR:-./config}:/config
+      - ${IGNITE_MODELS_DIR:-${SWAPDECK_MODELS_DIR:-./models}}:/models
+      - ${IGNITE_CONFIG_DIR:-${SWAPDECK_CONFIG_DIR:-./config}}:/config
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       - llama-runtime
@@ -47,8 +47,8 @@ services:
     ports:
       - "${LLAMA_SWAP_PORT:-8090}:8090"
     volumes:
-      - ${SWAPDECK_MODELS_DIR:-./models}:/models
-      - ${SWAPDECK_CONFIG_DIR:-./config}:/config
+      - ${IGNITE_MODELS_DIR:-${SWAPDECK_MODELS_DIR:-./models}}:/models
+      - ${IGNITE_CONFIG_DIR:-${SWAPDECK_CONFIG_DIR:-./config}}:/config
     environment:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
