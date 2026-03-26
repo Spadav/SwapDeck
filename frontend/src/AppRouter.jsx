@@ -10,6 +10,7 @@ import SettingsPage from './pages/SettingsPage'
 import SetupPage from './pages/SetupPage'
 import LogsPage from './pages/LogsPage'
 import UpdatesPage from './pages/UpdatesPage'
+import RuntimePage from './pages/RuntimePage'
 
 const SETUP_STATE_KEY = 'ignite_onboarding_complete_v1'
 
@@ -28,6 +29,7 @@ function AppWithRouter() {
           <Route path="models" element={<ModelsPage />} />
           <Route path="config" element={<ConfigPage />} />
           <Route path="status" element={<StatusPage />} />
+          <Route path="runtime" element={<RuntimePage />} />
           <Route path="logs" element={<LogsPage />} />
           <Route path="updates" element={<UpdatesPage />} />
           <Route path="test" element={<TestPage />} />

@@ -920,6 +920,184 @@ def get_llama_swap_events(lines: int = 100) -> List[str]:
         return []
 
 
+def get_llama_swap_model_status() -> List[Dict[str, Any]]:
+    """Read current model states from llama-swap's SSE event stream."""
+    base_url = get_llama_swap_base_url()
+    data_lines: List[str] = []
+
+    try:
+        with requests.get(f"{base_url}/api/events", stream=True, timeout=(1.0, 1.5)) as response:
+            if response.status_code != 200:
+                return []
+
+            for raw_line in response.iter_lines(decode_unicode=True):
+                if raw_line is None:
+                    continue
+                line = raw_line.strip()
+                if not line:
+                    if data_lines:
+                        payload_text = "\n".join(data_lines)
+                        try:
+                            envelope = json.loads(payload_text)
+                            payload_type = envelope.get("type") if isinstance(envelope, dict) else None
+                            payload = envelope.get("data") if isinstance(envelope, dict) else None
+                            if payload_type == "modelStatus" and isinstance(payload, str):
+                                payload = json.loads(payload)
+                            if payload_type == "modelStatus" and isinstance(payload, list):
+                                normalized = []
+                                for item in payload:
+                                    if not isinstance(item, dict):
+                                        continue
+                                    normalized.append(
+                                        {
+                                            "id": str(item.get("id") or item.get("model") or ""),
+                                            "name": str(item.get("name") or item.get("id") or item.get("model") or ""),
+                                            "state": str(item.get("state") or "unknown"),
+                                            "aliases": item.get("aliases") or [],
+                                            "unlisted": bool(item.get("unlisted", False)),
+                                            "peer_id": item.get("peerID"),
+                                        }
+                                    )
+                                return normalized
+                        except Exception:
+                            return []
+
+                    data_lines = []
+                    continue
+
+                if line.startswith("data:"):
+                    data_lines.append(line.split(":", 1)[1].strip())
+                    continue
+
+        return []
+    except Exception:
+        return []
+
+
+def get_llama_swap_runtime_overview() -> Dict[str, Any]:
+    """Read current runtime model state, metrics, and inflight count from llama-swap's SSE event stream."""
+    base_url = get_llama_swap_base_url()
+    data_lines: List[str] = []
+    models: List[Dict[str, Any]] = []
+    metrics: List[Dict[str, Any]] = []
+    inflight_total = 0
+
+    try:
+        with requests.get(f"{base_url}/api/events", stream=True, timeout=(1.0, 2.0)) as response:
+            if response.status_code != 200:
+                return {"models": models, "metrics": metrics, "inflight_total": inflight_total}
+
+            for raw_line in response.iter_lines(decode_unicode=True):
+                if raw_line is None:
+                    continue
+                line = raw_line.strip()
+                if not line:
+                    if data_lines:
+                        payload_text = "\n".join(data_lines)
+                        try:
+                            envelope = json.loads(payload_text)
+                            payload_type = envelope.get("type") if isinstance(envelope, dict) else None
+                            payload = envelope.get("data") if isinstance(envelope, dict) else None
+                            if isinstance(payload, str):
+                                payload = json.loads(payload)
+
+                            if payload_type == "modelStatus" and isinstance(payload, list):
+                                normalized = []
+                                for item in payload:
+                                    if not isinstance(item, dict):
+                                        continue
+                                    normalized.append(
+                                        {
+                                            "id": str(item.get("id") or item.get("model") or ""),
+                                            "name": str(item.get("name") or item.get("id") or item.get("model") or ""),
+                                            "state": str(item.get("state") or "unknown"),
+                                            "aliases": item.get("aliases") or [],
+                                            "unlisted": bool(item.get("unlisted", False)),
+                                            "peer_id": item.get("peerID"),
+                                        }
+                                    )
+                                models = normalized
+                            elif payload_type == "metrics" and isinstance(payload, list):
+                                metrics = [item for item in payload if isinstance(item, dict)]
+                            elif payload_type == "inflight" and isinstance(payload, dict):
+                                inflight_total = int(payload.get("total") or 0)
+                        except Exception:
+                            pass
+
+                    data_lines = []
+                    if models and metrics:
+                        break
+                    continue
+
+                if line.startswith("data:"):
+                    data_lines.append(line.split(":", 1)[1].strip())
+                    continue
+
+        return {"models": models, "metrics": metrics, "inflight_total": inflight_total}
+    except Exception:
+        return {"models": models, "metrics": metrics, "inflight_total": inflight_total}
+
+
+def get_llama_swap_capture(capture_id: int) -> Any:
+    base_url = get_llama_swap_base_url()
+    try:
+        response = requests.get(f"{base_url}/api/captures/{capture_id}", timeout=15)
+        if response.status_code == 404:
+            raise HTTPException(status_code=404, detail="Capture not found")
+        if not response.ok:
+            raise HTTPException(status_code=response.status_code, detail=f"Failed to fetch capture: {response.text[:300]}")
+        return response.json()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch capture: {exc}")
+
+
+def request_llama_swap_model_load(model_id: str) -> Dict[str, Any]:
+    if not model_id:
+        raise HTTPException(status_code=400, detail="Model ID is required")
+
+    base_url = get_llama_swap_base_url()
+    try:
+        response = requests.get(f"{base_url}/upstream/{quote(model_id)}/", timeout=60)
+        if not response.ok:
+            raise HTTPException(status_code=response.status_code, detail=f"Failed to load model: {response.text[:300]}")
+        return {"ok": True, "model_id": model_id, "action": "load"}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to load model: {exc}")
+
+
+def request_llama_swap_model_unload(model_id: str) -> Dict[str, Any]:
+    if not model_id:
+        raise HTTPException(status_code=400, detail="Model ID is required")
+
+    base_url = get_llama_swap_base_url()
+    try:
+        response = requests.post(f"{base_url}/api/models/unload/{quote(model_id)}", timeout=15)
+        if not response.ok:
+            raise HTTPException(status_code=response.status_code, detail=f"Failed to unload model: {response.text[:300]}")
+        return {"ok": True, "model_id": model_id, "action": "unload"}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to unload model: {exc}")
+
+
+def request_llama_swap_unload_all() -> Dict[str, Any]:
+    base_url = get_llama_swap_base_url()
+    try:
+        response = requests.post(f"{base_url}/api/models/unload", timeout=15)
+        if not response.ok:
+            raise HTTPException(status_code=response.status_code, detail=f"Failed to unload all models: {response.text[:300]}")
+        return {"ok": True, "action": "unload_all"}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to unload all models: {exc}")
+
+
 def list_gguf_files() -> List[Dict[str, Any]]:
     """List all GGUF model files in the directory"""
     models = []
@@ -1553,6 +1731,42 @@ def api_discover_recommendations(
 def api_get_updates(refresh: bool = Query(False)):
     """Get current versions, update signals, and changelog links for Ignite runtime components."""
     return get_updates_payload(refresh=refresh)
+
+
+@app.get("/api/runtime/models")
+def api_runtime_models():
+    """Get current model states from llama-swap."""
+    return {"models": get_llama_swap_model_status()}
+
+
+@app.get("/api/runtime/overview")
+def api_runtime_overview():
+    """Get model states, request metrics, and inflight count from llama-swap."""
+    return get_llama_swap_runtime_overview()
+
+
+@app.get("/api/runtime/captures/{capture_id}")
+def api_runtime_capture(capture_id: int):
+    """Get a stored request/response capture from llama-swap."""
+    return get_llama_swap_capture(capture_id)
+
+
+@app.post("/api/runtime/models/load/{model_id}")
+def api_runtime_model_load(model_id: str):
+    """Explicitly load a model through llama-swap."""
+    return request_llama_swap_model_load(model_id)
+
+
+@app.post("/api/runtime/models/unload/{model_id}")
+def api_runtime_model_unload(model_id: str):
+    """Explicitly unload a model through llama-swap."""
+    return request_llama_swap_model_unload(model_id)
+
+
+@app.post("/api/runtime/models/unload")
+def api_runtime_models_unload_all():
+    """Unload all currently loaded models."""
+    return request_llama_swap_unload_all()
 
 
 @app.get("/api/status")
