@@ -159,17 +159,51 @@ def get_docker_log_container_map() -> Dict[str, str]:
     }
 
 
-def get_docker_restart_policy_name() -> Optional[str]:
+def get_managed_docker_restart_policies() -> Dict[str, Optional[str]]:
     client = get_docker_client()
     if client is None:
+        return {}
+
+    policies: Dict[str, Optional[str]] = {}
+    container_names = ["ignite", DOCKER_RUNTIME_CONTAINER, *DOCKER_SUPPORT_CONTAINERS]
+    for container_name in container_names:
+        try:
+            container = client.containers.get(container_name)
+            policy = (((container.attrs or {}).get("HostConfig") or {}).get("RestartPolicy") or {}).get("Name")
+            policies[container_name] = policy or "no"
+        except Exception:
+            policies[container_name] = None
+    return policies
+
+
+def get_docker_restart_policy_name() -> Optional[str]:
+    policies = get_managed_docker_restart_policies()
+    if not policies:
         return None
+    available = [policy for policy in policies.values() if policy is not None]
+    if not available:
+        return None
+    if len(set(available)) == 1:
+        return available[0]
+    return "mismatch"
+
+
+def reconcile_docker_restart_policy_from_settings() -> None:
+    if not is_docker_managed_runtime():
+        return
+
+    desired_enabled = bool(settings.get("restart_on_boot"))
+    desired_policy = "unless-stopped" if desired_enabled else "no"
+    current_policy = get_docker_restart_policy_name()
+
+    if current_policy == desired_policy:
+        return
 
     try:
-        runtime = client.containers.get(DOCKER_RUNTIME_CONTAINER)
-        policy = (((runtime.attrs or {}).get("HostConfig") or {}).get("RestartPolicy") or {}).get("Name")
-        return policy or "no"
-    except Exception:
-        return None
+        apply_docker_restart_policy(desired_enabled)
+        logger.info("Reconciled Docker restart policy to '%s' from saved Ignite settings.", desired_policy)
+    except Exception as exc:
+        logger.warning("Failed to reconcile Docker restart policy on startup: %s", exc)
 
 
 def apply_docker_restart_policy(enabled: bool) -> None:
@@ -281,6 +315,11 @@ app.add_middleware(
 # Serve built frontend files when available (single-process runtime mode).
 if (FRONTEND_DIST_DIR / "assets").exists():
     app.mount("/assets", StaticFiles(directory=FRONTEND_DIST_DIR / "assets"), name="assets")
+
+
+@app.on_event("startup")
+def reconcile_runtime_settings_on_startup():
+    reconcile_docker_restart_policy_from_settings()
 
 
 @dataclass
@@ -1989,6 +2028,7 @@ async def websocket_download(websocket: WebSocket, task_id: str):
 @app.get("/api/settings")
 def api_get_settings():
     """Get current settings"""
+    docker_restart_policies = get_managed_docker_restart_policies() if is_docker_managed_runtime() else {}
     docker_restart_policy = get_docker_restart_policy_name() if is_docker_managed_runtime() else None
     restart_on_boot = (
         docker_restart_policy == "unless-stopped"
@@ -2004,6 +2044,8 @@ def api_get_settings():
             "config_exists": Path(os.path.expanduser(settings["llama_swap_config"])).exists(),
             "docker_control_warning": get_docker_control_warning(),
             "docker_restart_policy": docker_restart_policy,
+            "docker_restart_policies": docker_restart_policies if is_docker_managed_runtime() else None,
+            "docker_restart_policy_mismatch": docker_restart_policy == "mismatch",
             "docker_paths": {
                 "models_dir": os.environ.get("IGNITE_MODELS_DIR", os.environ.get("SWAPDECK_MODELS_DIR", "./models")),
                 "config_dir": os.environ.get("IGNITE_CONFIG_DIR", os.environ.get("SWAPDECK_CONFIG_DIR", "./config")),
