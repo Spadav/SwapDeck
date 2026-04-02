@@ -332,6 +332,7 @@ class DownloadTask:
 
 active_downloads: Dict[str, DownloadTask] = {}
 docker_gpu_preflight_cache: Dict[str, Any] = {"checked_at": None, "result": None}
+runtime_versions_cache: Dict[str, Any] = {"checked_at": None, "result": None}
 updates_cache: Dict[str, Any] = {"checked_at": None, "result": None}
 
 
@@ -366,7 +367,6 @@ def read_text_if_exists(path: Path) -> str:
 def parse_current_runtime_refs() -> Dict[str, Any]:
     env_ignite_version = os.environ.get("IGNITE_APP_VERSION", "").strip()
     env_llama_cpp_image = os.environ.get("LLAMA_CPP_IMAGE_REF", "").strip()
-    env_llama_swap_version = os.environ.get("LLAMA_SWAP_VERSION_REF", "").strip()
     env_llmfit_image = os.environ.get("LLMFIT_IMAGE_REF", "").strip()
 
     repo_root = get_repo_root()
@@ -375,17 +375,12 @@ def parse_current_runtime_refs() -> Dict[str, Any]:
     frontend_package = read_text_if_exists(repo_root / "frontend" / "package.json")
 
     llama_cpp_image = None
-    llama_swap_version = None
     llmfit_image = None
     ignite_version = None
 
     image_match = re.search(r"ARG\s+LLAMA_CPP_IMAGE=(.+)", runtime_dockerfile)
     if image_match:
         llama_cpp_image = image_match.group(1).strip()
-
-    swap_match = re.search(r"ARG\s+LLAMA_SWAP_VERSION=(.+)", runtime_dockerfile)
-    if swap_match:
-        llama_swap_version = swap_match.group(1).strip()
 
     llmfit_match = re.search(r"image:\s*(ghcr\.io/alexsjones/llmfit:[^\s]+)", compose_yaml)
     if llmfit_match:
@@ -400,9 +395,82 @@ def parse_current_runtime_refs() -> Dict[str, Any]:
     return {
         "ignite_version": env_ignite_version or ignite_version or "unknown",
         "llama_cpp_image": env_llama_cpp_image or llama_cpp_image or "ghcr.io/ggml-org/llama.cpp:server-cuda",
-        "llama_swap_version": env_llama_swap_version or llama_swap_version or "unknown",
         "llmfit_image": env_llmfit_image or llmfit_image or "ghcr.io/alexsjones/llmfit:latest",
     }
+
+
+def get_runtime_binary_versions(refresh: bool = False) -> Dict[str, Any]:
+    checked_at = runtime_versions_cache.get("checked_at")
+    if (
+        not refresh
+        and isinstance(checked_at, datetime)
+        and datetime.now() - checked_at < timedelta(minutes=5)
+        and isinstance(runtime_versions_cache.get("result"), dict)
+    ):
+        return runtime_versions_cache["result"]
+
+    result = {
+        "llama_swap_version": "unknown",
+        "llama_swap_build": "",
+        "llama_swap_commit": "",
+        "llama_cpp_version": "unknown",
+        "llama_cpp_build": "",
+        "llama_cpp_commit": "",
+    }
+
+    client = get_docker_client()
+    if client is None:
+        runtime_versions_cache.update({"checked_at": datetime.now(), "result": result})
+        return result
+
+    try:
+        container = client.containers.get(DOCKER_RUNTIME_CONTAINER)
+        swap_exec_result = container.exec_run(
+            ["/bin/bash", "-lc", "llama-swap --version || /usr/local/bin/llama-swap --version || llama-swap -v"],
+            stdout=True,
+            stderr=True,
+        )
+        swap_output = ""
+        if getattr(swap_exec_result, "output", None):
+            swap_output = swap_exec_result.output.decode("utf-8", errors="replace")
+
+        swap_match = re.search(r"version:\s*(\d+)\s*\(([^)]+)\)", swap_output)
+        if swap_match:
+            build = swap_match.group(1).strip()
+            commit = swap_match.group(2).strip()
+            result.update(
+                {
+                    "llama_swap_version": f"v{build}",
+                    "llama_swap_build": build,
+                    "llama_swap_commit": commit,
+                }
+            )
+
+        exec_result = container.exec_run(
+            ["/bin/bash", "-lc", "/app/llama-server --version || llama-server --version"],
+            stdout=True,
+            stderr=True,
+        )
+        version_output = ""
+        if getattr(exec_result, "output", None):
+            version_output = exec_result.output.decode("utf-8", errors="replace")
+
+        match = re.search(r"version:\s*(\d+)\s*\(([^)]+)\)", version_output)
+        if match:
+            build = match.group(1).strip()
+            commit = match.group(2).strip()
+            result.update(
+                {
+                    "llama_cpp_version": f"{build} ({commit})",
+                    "llama_cpp_build": build,
+                    "llama_cpp_commit": commit,
+                }
+            )
+    except Exception as exc:
+        logger.warning("Failed to detect runtime llama.cpp version: %s", exc)
+
+    runtime_versions_cache.update({"checked_at": datetime.now(), "result": result})
+    return result
 
 
 def fetch_github_json(url: str) -> Optional[Dict[str, Any]]:
@@ -449,9 +517,20 @@ def get_updates_payload(refresh: bool = False) -> Dict[str, Any]:
         return updates_cache["result"]
 
     refs = parse_current_runtime_refs()
+    runtime_versions = get_runtime_binary_versions(refresh=refresh)
     llama_swap_release = fetch_github_json("https://api.github.com/repos/mostlygeek/llama-swap/releases/latest")
     llama_cpp_repo = fetch_github_json("https://api.github.com/repos/ggml-org/llama.cpp")
+    llama_cpp_latest_commit = fetch_github_json("https://api.github.com/repos/ggml-org/llama.cpp/commits/master")
     llmfit_repo = fetch_github_json("https://api.github.com/repos/alexsjones/llmfit")
+
+    latest_llama_cpp_sha = str((llama_cpp_latest_commit or {}).get("sha") or "").strip()
+    current_llama_cpp_commit = runtime_versions.get("llama_cpp_commit", "")
+    if current_llama_cpp_commit and latest_llama_cpp_sha:
+        llama_cpp_status = "up_to_date" if latest_llama_cpp_sha.startswith(current_llama_cpp_commit) else "upstream_ahead"
+        latest_llama_cpp_label = f"master ({latest_llama_cpp_sha[:9]})"
+    else:
+        llama_cpp_status = "unknown"
+        latest_llama_cpp_label = (llama_cpp_repo or {}).get("pushed_at")
 
     components = [
         {
@@ -463,7 +542,9 @@ def get_updates_payload(refresh: bool = False) -> Dict[str, Any]:
             "summary": "Ignite is your app layer. Update it by pulling the repo and rebuilding the stack.",
             "changelog_url": "https://github.com/Spadav/Ignite/commits/main",
             "release_url": "https://github.com/Spadav/Ignite",
+            "update_path_label": "Refresh Installed Runtime",
             "update_script": "./scripts/update.sh",
+            "version_upgrade_label": "",
             "manual_update": [
                 "git pull --ff-only",
                 "docker compose build --pull ignite llama-runtime",
@@ -474,13 +555,15 @@ def get_updates_payload(refresh: bool = False) -> Dict[str, Any]:
         {
             "id": "llama-swap",
             "name": "llama-swap",
-            "current": f"v{refs['llama_swap_version']}" if refs["llama_swap_version"] != "unknown" else "unknown",
+            "current": runtime_versions["llama_swap_version"],
             "latest": llama_swap_release.get("tag_name") if llama_swap_release else None,
-            "status": compare_numeric_versions(refs["llama_swap_version"], llama_swap_release.get("tag_name", "")) if llama_swap_release else "unknown",
+            "status": compare_numeric_versions(runtime_versions["llama_swap_build"], llama_swap_release.get("tag_name", "")) if llama_swap_release else "unknown",
             "summary": "Pinned release inside the runtime image. This can be compared directly to the latest upstream release.",
             "changelog_url": (llama_swap_release or {}).get("html_url") or "https://github.com/mostlygeek/llama-swap/releases",
             "release_url": "https://github.com/mostlygeek/llama-swap/releases",
+            "update_path_label": "Refresh Installed Runtime",
             "update_script": "./scripts/update.sh",
+            "version_upgrade_label": "Upgrade To New Version",
             "manual_update": [
                 "Edit docker/llama-runtime/Dockerfile",
                 "Bump LLAMA_SWAP_VERSION",
@@ -490,14 +573,16 @@ def get_updates_payload(refresh: bool = False) -> Dict[str, Any]:
         },
         {
             "id": "llama.cpp",
-            "name": "llama.cpp runtime image",
-            "current": refs["llama_cpp_image"],
-            "latest": (llama_cpp_repo or {}).get("pushed_at"),
-            "status": "floating_image",
-            "summary": "This uses a floating Docker image reference. Rebuilds and pulls track upstream, but exact freshness cannot be compared from the tag alone.",
+            "name": "llama.cpp",
+            "current": runtime_versions["llama_cpp_version"],
+            "latest": latest_llama_cpp_label,
+            "status": llama_cpp_status,
+            "summary": "Reported directly by the running runtime container. `./scripts/update.sh` refreshes the published runtime image. Upstream master may still move ahead between image publishes.",
             "changelog_url": "https://github.com/ggml-org/llama.cpp/commits/master",
             "release_url": "https://github.com/ggml-org/llama.cpp",
+            "update_path_label": "Refresh Runtime Image",
             "update_script": "./scripts/update.sh",
+            "version_upgrade_label": "",
             "manual_update": [
                 "docker compose build --pull llama-runtime ignite",
                 "docker compose up -d",
@@ -512,7 +597,9 @@ def get_updates_payload(refresh: bool = False) -> Dict[str, Any]:
             "summary": "This uses the floating `latest` image tag. Pull again to refresh to the newest published image.",
             "changelog_url": "https://github.com/alexsjones/llmfit/commits/main",
             "release_url": "https://github.com/alexsjones/llmfit",
+            "update_path_label": "Refresh Runtime Image",
             "update_script": "./scripts/update.sh",
+            "version_upgrade_label": "",
             "manual_update": [
                 "docker compose pull llmfit",
                 "docker compose up -d llmfit",

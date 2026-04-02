@@ -6,6 +6,8 @@ function statusTone(status) {
       return { bg: 'rgba(34, 197, 94, 0.14)', border: 'rgba(34, 197, 94, 0.35)', text: '#bbf7d0', label: 'Up to Date' }
     case 'update_available':
       return { bg: 'rgba(245, 158, 11, 0.14)', border: 'rgba(245, 158, 11, 0.35)', text: '#fde68a', label: 'Update Available' }
+    case 'upstream_ahead':
+      return { bg: 'rgba(245, 158, 11, 0.14)', border: 'rgba(245, 158, 11, 0.35)', text: '#fde68a', label: 'Upstream Ahead' }
     case 'ahead_or_custom':
       return { bg: 'rgba(59, 130, 246, 0.14)', border: 'rgba(59, 130, 246, 0.35)', text: '#bfdbfe', label: 'Ahead / Custom' }
     case 'floating_image':
@@ -53,7 +55,7 @@ function UpdatesPage() {
         <div>
           <h2 className="text-2xl font-semibold tracking-tight">Updates</h2>
           <p className="text-sm mt-1" style={{ color: 'var(--text-muted)' }}>
-            Check what Ignite is using, what can be compared directly, and where to read upstream changelogs.
+            Check the versions Ignite is using right now and whether upstream has moved ahead.
           </p>
         </div>
         <button onClick={() => loadUpdates(true)} disabled={checking} className="btn btn-primary">
@@ -70,9 +72,9 @@ function UpdatesPage() {
       <div className="card mb-6">
         <h3 className="text-lg font-semibold mb-2">How Updates Work</h3>
         <div className="space-y-2 text-sm" style={{ color: 'var(--text-muted)' }}>
-          <div>- Pinned versions like `llama-swap` can be compared directly against upstream releases.</div>
-          <div>- Floating Docker tags like `llama.cpp:server-cuda` or `llmfit:latest` follow upstream on pull/rebuild, so exact freshness cannot be proven from the tag alone.</div>
-          <div>- Use `Check For Updates` to refresh upstream release metadata and changelog links.</div>
+          <div>- `llama-swap` is pinned in the runtime image, so Ignite can compare it directly with the latest upstream release.</div>
+          <div>- `llama.cpp` is read from the running runtime container, so Ignite can show the actual build and commit in use.</div>
+          <div>- Use `Check For Updates` to refresh upstream metadata and changelog links.</div>
         </div>
         {data?.checked_at && (
           <p className="text-xs mt-3" style={{ color: 'var(--text-muted)' }}>
@@ -107,7 +109,7 @@ function UpdatesPage() {
                   <div className="font-mono text-sm mt-1 break-all">{component.current || 'Unknown'}</div>
                 </div>
                 <div className="rounded-lg border p-3" style={{ borderColor: 'var(--line-soft)', background: 'rgba(148, 163, 184, 0.08)' }}>
-                  <div className="text-sm font-medium">Latest Upstream Signal</div>
+                  <div className="text-sm font-medium">Latest Upstream</div>
                   <div className="font-mono text-sm mt-1 break-all">{component.latest || 'Not available'}</div>
                 </div>
               </div>
@@ -122,18 +124,24 @@ function UpdatesPage() {
               </div>
 
               <div className="rounded-lg border p-4" style={{ borderColor: 'var(--line-soft)' }}>
-                <div className="text-sm font-semibold mb-2">Update Path</div>
+                <div className="text-sm font-semibold mb-2">{component.update_path_label || 'Update Path'}</div>
                 <div className="font-mono text-sm rounded-lg border p-3 mb-3" style={{ borderColor: 'var(--line-soft)', background: 'rgba(148, 163, 184, 0.08)' }}>
                   {component.update_script}
                 </div>
-                <div className="text-sm font-medium mb-2">Manual Commands</div>
-                <div className="space-y-2">
-                  {(component.manual_update || []).map((line, index) => (
-                    <div key={index} className="font-mono text-sm rounded-lg border p-3 break-all" style={{ borderColor: 'var(--line-soft)', background: 'rgba(148, 163, 184, 0.04)' }}>
-                      {line}
+                {(component.manual_update || []).length > 0 && (
+                  <>
+                    <div className="text-sm font-medium mb-2">
+                      {component.version_upgrade_label || 'Manual Commands'}
                     </div>
-                  ))}
-                </div>
+                    <div className="space-y-2">
+                      {(component.manual_update || []).map((line, index) => (
+                        <div key={index} className="font-mono text-sm rounded-lg border p-3 break-all" style={{ borderColor: 'var(--line-soft)', background: 'rgba(148, 163, 184, 0.04)' }}>
+                          {line}
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
               </div>
             </div>
           )
