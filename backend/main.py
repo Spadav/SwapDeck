@@ -1181,17 +1181,25 @@ def download_model(url: str, filename: str) -> str:
 
 def list_hf_gguf_files(repo_id: str) -> List[Dict[str, Any]]:
     """List GGUF files in a Hugging Face repository."""
-    headers = {}
     hf_token = os.environ.get("HF_TOKEN")
-    if hf_token:
-        headers["Authorization"] = f"Bearer {hf_token}"
+    request_url = f"https://huggingface.co/api/models/{repo_id}"
+    request_params = [("expand[]", "siblings")]
 
-    response = requests.get(
-        f"https://huggingface.co/api/models/{repo_id}",
-        params=[("expand[]", "siblings")],
-        headers=headers,
-        timeout=20,
-    )
+    def fetch_model_info(use_auth: bool) -> requests.Response:
+        headers = {}
+        if use_auth and hf_token:
+            headers["Authorization"] = f"Bearer {hf_token}"
+        return requests.get(
+            request_url,
+            params=request_params,
+            headers=headers,
+            timeout=20,
+        )
+
+    response = fetch_model_info(use_auth=bool(hf_token))
+    if hf_token and response.status_code in {401, 403}:
+        logger.warning("HF_TOKEN was rejected for repo %s; retrying anonymously", repo_id)
+        response = fetch_model_info(use_auth=False)
 
     if response.status_code == 404:
         raise HTTPException(status_code=404, detail=f"Repo not found: {repo_id}")

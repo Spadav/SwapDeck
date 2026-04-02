@@ -148,7 +148,9 @@ function ModelsPage() {
   }
 
   const fetchRepoFiles = async (repoOverride) => {
-    const resolvedRepo = (repoOverride ?? repoId).trim()
+    const resolvedRepo = typeof repoOverride === 'string'
+      ? repoOverride.trim()
+      : repoId.trim()
     if (!resolvedRepo) return
     try {
       setRepoLoading(true)
@@ -300,7 +302,7 @@ function ModelsPage() {
             />
           </div>
           <button
-            onClick={fetchRepoFiles}
+            onClick={() => fetchRepoFiles()}
             disabled={repoLoading || downloading || !repoId.trim()}
             className="btn btn-secondary"
           >
